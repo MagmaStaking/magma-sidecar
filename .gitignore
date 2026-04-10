@@ -1,0 +1,21 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Cargo.lock: keep committed for reproducible builds of this binary.
+
+# Local / secrets
+.env
+.env.*
+!.env.example
+
+# Editors & OS
+.idea
+.vscode
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Debug / logs
+*.log

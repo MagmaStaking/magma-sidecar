@@ -1,0 +1,31 @@
+[package]
+name = "magma-sidecar"
+version = "0.1.0"
+edition = "2021"
+description = "Magma sidecar: ingress to rbuilder, egress of optimized builder bundles to Monad"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[[bin]]
+name = "magma-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+# Path to a checkout of `monad-bft` (sibling repo). Those crates stay in the monad-bft workspace; this crate does not.
+alloy-primitives = "1.5"
+axum = { version = "0.7", features = ["json"] }
+clap = { version = "4.2", features = ["derive", "env"] }
+futures = "0.3"
+monad-eth-txpool-ipc = { path = "../monad-bft/monad-eth-txpool-ipc" }
+monad-eth-txpool-types = { path = "../monad-bft/monad-eth-txpool-types" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tokio = { version = "1.39", features = ["macros", "rt-multi-thread", "signal", "net"] }
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tokio = { version = "1.39", features = ["macros", "rt-multi-thread"] }
