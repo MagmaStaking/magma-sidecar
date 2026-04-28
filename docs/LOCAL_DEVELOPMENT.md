@@ -111,14 +111,20 @@ Equivalent environment variables (see `README.md`):
 - `MAGMA_SIDECAR_BIND` — default `127.0.0.1:8089`
 - `MAGMA_MONAD_RPC_URL` — Monad JSON-RPC base URL
 - `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC
+- `MAGMA_POLICY_CONFIG` — path to the TOML tip policy (omit for legacy constant-priority mode)
 - `MAGMA_TX_PRIORITY` — fallback hex priority for outbound `EthTxPoolIpcTx` (default `0xffff`)
 - `RUST_LOG` — e.g. `info,magma_sidecar=debug`
+
+To exercise the tip-scoring policy locally, point `--policy-config` at a TOML file listing the deployed `MagmaSearcherGateway` address (see the README for schema). Without it, every `Insert` is stamped with the constant `--tx-priority`.
 
 Verify:
 
 ```bash
-curl -s http://127.0.0.1:8089/health
-# {"status":"ok",...}
+curl -s http://127.0.0.1:8089/health | jq
+# {"status":"ok","ipc_state":"connected","tx_inserts_observed":N,"tx_prioritized":N,...}
+
+curl -s http://127.0.0.1:8089/metrics | head
+# # HELP magma_sidecar_txpool_ipc_state ...
 
 curl -s -X POST http://127.0.0.1:8089/rpc/monad \
   -H 'Content-Type: application/json' \

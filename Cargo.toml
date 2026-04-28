@@ -2,7 +2,7 @@
 name = "magma-sidecar"
 version = "0.1.0"
 edition = "2021"
-description = "Magma sidecar: ingress to rbuilder, egress of optimized builder bundles to Monad"
+description = "Magma sidecar: HTTP ingress + tip-based txpool reprioritization for Monad"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 
@@ -11,21 +11,36 @@ name = "magma-sidecar"
 path = "src/main.rs"
 
 [dependencies]
-# Path to a checkout of `monad-bft` (sibling repo). Those crates stay in the monad-bft workspace; this crate does not.
+# IPC types/protocol come straight from the upstream `monad-bft` workspace, pinned by rev.
+# Bump the rev together to keep the wire format in sync; both crates must come from the same tree.
+alloy-consensus = "1.8"
 alloy-primitives = "1.5"
 axum = { version = "0.7", features = ["json"] }
 clap = { version = "4.2", features = ["derive", "env"] }
 futures = "0.3"
-monad-eth-txpool-ipc = { path = "../monad-bft/monad-eth-txpool-ipc" }
-monad-eth-txpool-types = { path = "../monad-bft/monad-eth-txpool-types" }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+monad-eth-txpool-ipc = { git = "https://github.com/category-labs/monad-bft.git", rev = "cd04c9e1fba2c829db758d6359f2a59ebbc1ca79" }
+monad-eth-txpool-types = { git = "https://github.com/category-labs/monad-bft.git", rev = "cd04c9e1fba2c829db758d6359f2a59ebbc1ca79" }
+prometheus = { version = "0.13", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
-tokio = { version = "1.39", features = ["macros", "rt-multi-thread", "signal", "net"] }
+tokio = { version = "1.39", features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "net",
+] }
+toml = "0.8"
 tower-http = { version = "0.6", features = ["trace", "limit"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
+alloy-consensus = "1.8"
+http-body-util = "0.1"
 tokio = { version = "1.39", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }

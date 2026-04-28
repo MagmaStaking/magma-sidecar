@@ -1,22 +1,28 @@
-//! Magma sidecar — HTTP bridge between searchers, rbuilder, and Monad.
+//! Magma sidecar — HTTP ingress + tip-based txpool reprioritization for a Monad node.
 //!
 //! See `docs/ARCHITECTURE.md` for the end-to-end design.
 
 mod config;
 mod error;
 mod forward;
+mod metrics;
+mod policy;
 mod routes;
 mod txpool_ipc;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use clap::Parser;
 use config::Config;
+use metrics::Metrics;
+use policy::PolicyConfig;
 use routes::{router, HttpState};
 use tokio::sync::watch;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
+use txpool_ipc::PriorityMode;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -27,19 +33,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let config = Config::parse();
-    let tx_priority = config::parse_u256_hex(&config.tx_priority_hex).map_err(|e| {
+    let fallback_priority = config::parse_u256_hex(&config.tx_priority_hex).map_err(|e| {
         format!("invalid --tx-priority / MAGMA_TX_PRIORITY ({e}); use hex, e.g. 0xffff or ffff")
     })?;
+
+    let priority_mode = match config.policy_config.as_ref() {
+        Some(path) => {
+            let policy = PolicyConfig::load(path)?;
+            tracing::info!(
+                path = %path.display(),
+                gateways = policy.gateway_count(),
+                "loaded tip policy"
+            );
+            PriorityMode::Policy {
+                policy: Arc::new(policy),
+                fallback: fallback_priority,
+            }
+        }
+        None => {
+            tracing::info!(
+                priority = %fallback_priority,
+                "no policy file; using constant priority for every Insert"
+            );
+            PriorityMode::Constant(fallback_priority)
+        }
+    };
 
     let max_body = config.max_body_bytes;
     let bind: SocketAddr = config.bind;
     let txpool_socket = config.txpool_socket.clone();
 
-    let state = HttpState::try_new(config)?;
+    let metrics = Metrics::new();
+    let state = HttpState::try_new(config, metrics.clone())?;
     tracing::info!(
         %bind,
         monad_rpc = %state.config.monad_rpc_url,
-        rbuilder_rpc = %state.config.rbuilder_rpc_url,
         txpool_ipc = ?txpool_socket,
         "starting magma-sidecar"
     );
@@ -54,8 +82,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let ipc_task = if let Some(path) = txpool_socket {
         let shutdown_rx = shutdown_tx.subscribe();
+        let metrics_for_ipc = metrics.clone();
         Some(tokio::spawn(async move {
-            txpool_ipc::run_txpool_priority_loop(path, tx_priority, shutdown_rx).await;
+            txpool_ipc::run_txpool_priority_loop(path, priority_mode, metrics_for_ipc, shutdown_rx)
+                .await;
         }))
     } else {
         None

@@ -1,4 +1,4 @@
-//! HTTP forwarding helpers for JSON-RPC to rbuilder and Monad.
+//! HTTP forwarding helpers for JSON-RPC to the Monad EL.
 
 use reqwest::Client;
 
