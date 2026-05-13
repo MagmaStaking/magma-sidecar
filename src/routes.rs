@@ -142,7 +142,12 @@ mod tests {
     async fn health_returns_structured_snapshot() {
         let app = router(test_state("http://127.0.0.1:1".into()));
         let resp = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -163,7 +168,12 @@ mod tests {
         // the route's own bump happens *after* render returns.
         let resp = app
             .clone()
-            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -182,7 +192,12 @@ mod tests {
 
         // Second scrape: now the http counter has been observed at least once.
         let resp2 = app
-            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body2 = to_bytes(resp2.into_body(), 1 << 20).await.unwrap();

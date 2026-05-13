@@ -51,6 +51,7 @@ pub struct Metrics {
     pub txpool_events_total: IntCounterVec, // labels: kind = insert|commit|drop|evict
     pub txpool_inserts_total: IntCounter,
     pub txpool_prioritized_total: IntCounter,
+    pub txpool_skipped_non_gateway_total: IntCounter,
     pub txpool_send_failures_total: IntCounter,
     pub txpool_ipc_reconnects_total: IntCounter,
     pub txpool_ipc_state: IntGauge,
@@ -92,6 +93,13 @@ impl Metrics {
             registry
         )
         .expect("register txpool_prioritized_total");
+
+        let txpool_skipped_non_gateway_total = register_int_counter_with_registry!(
+            "txpool_skipped_non_gateway_total",
+            "Number of Insert events ignored because `to` was not an allowlisted MagmaSearcherGateway.",
+            registry
+        )
+        .expect("register txpool_skipped_non_gateway_total");
 
         let txpool_send_failures_total = register_int_counter_with_registry!(
             "txpool_send_failures_total",
@@ -141,6 +149,7 @@ impl Metrics {
             txpool_events_total,
             txpool_inserts_total,
             txpool_prioritized_total,
+            txpool_skipped_non_gateway_total,
             txpool_send_failures_total,
             txpool_ipc_reconnects_total,
             txpool_ipc_state,
@@ -178,6 +187,10 @@ impl Metrics {
         self.last_send_ts.store(now, Ordering::Relaxed);
     }
 
+    pub fn record_skipped_non_gateway(&self) {
+        self.txpool_skipped_non_gateway_total.inc();
+    }
+
     pub fn record_send_failure(&self) {
         self.txpool_send_failures_total.inc();
     }
@@ -213,6 +226,7 @@ impl Metrics {
             ipc_state: ipc_state_from_gauge(self.ipc_state.load(Ordering::Relaxed)).as_str(),
             tx_inserts_observed: self.txpool_inserts_total.get(),
             tx_prioritized: self.txpool_prioritized_total.get(),
+            tx_skipped_non_gateway: self.txpool_skipped_non_gateway_total.get(),
             ipc_send_failures: self.txpool_send_failures_total.get(),
             ipc_reconnects: self.txpool_ipc_reconnects_total.get(),
             last_event_unix_seconds: nonzero(self.last_event_ts.load(Ordering::Relaxed)),
@@ -251,6 +265,7 @@ pub struct HealthSnapshot {
     pub ipc_state: &'static str,
     pub tx_inserts_observed: u64,
     pub tx_prioritized: u64,
+    pub tx_skipped_non_gateway: u64,
     pub ipc_send_failures: u64,
     pub ipc_reconnects: u64,
     #[serde(skip_serializing_if = "Option::is_none")]

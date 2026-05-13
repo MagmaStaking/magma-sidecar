@@ -16,16 +16,20 @@
 //!   `gas_price` for legacy/EIP-2930 — the latter is a generous upper bound, but
 //!   that matches the design's "naive, tip-based MEV" framing.
 //! - `bid_routed_to_MagmaSearcherGateway` is the statically detectable bid into
-//!   an allowlisted gateway in the same tx. Two cases:
-//!   1. `to == gateway` AND calldata is `magmaSearcherGatewayCall(address,
-//!      uint256 bidAmount, address, bytes)` — we decode `bidAmount` from
-//!      calldata. This is the on-chain enforced minimum net ETH gain on the
-//!      gateway (see `mev-entrypoint/src/MagmaSearcherGateway.sol`) and is the
-//!      right number to rank by, since `magmaSearcherGatewayCall` is
-//!      `nonpayable` and so `tx.value` is always 0 on this path.
-//!   2. `to == gateway` with non-matching/empty calldata — we fall back to
-//!      `tx.value` (the gateway's `receive()` payable path: an off-chain
-//!      operator topping up the gateway directly).
+//!   an allowlisted gateway in the same tx. We only count it when `to ==
+//!   gateway` AND calldata is `magmaSearcherGatewayCall(address, uint256
+//!   bidAmount, address, bytes)` — we then decode `bidAmount` from calldata.
+//!   This is the on-chain enforced minimum net ETH gain on the gateway (see
+//!   `mev-entrypoint/src/MagmaSearcherGateway.sol`) and is the right number to
+//!   rank by, since `magmaSearcherGatewayCall` is `nonpayable` and so
+//!   `tx.value` is always 0 on this path.
+//!
+//!   Anything else to a gateway address — empty calldata, a non-matching
+//!   selector, a direct `receive()` top-up — gets a bid component of zero. We
+//!   deliberately do *not* fall back to `tx.value`: a `receive()` top-up is an
+//!   operational deposit, not a searcher bid declared as a minimum net gain,
+//!   so ranking it as one would conflate two different intents and let anyone
+//!   buy priority by sending native value to the gateway.
 //!
 //!   Per-gateway multipliers in the policy file let us weight trusted gateways
 //!   without changing code; richer attribution (event-based, sub-call value
@@ -150,6 +154,16 @@ impl PolicyConfig {
         self.gateway_weights.len()
     }
 
+    /// True when `addr` is an allowlisted `MagmaSearcherGateway`.
+    ///
+    /// Gateways with `weight = 0` are still considered allowlisted by this
+    /// predicate (they were declared in the policy, just deliberately
+    /// neutralized in the score). This keeps "is this a gateway tx?" decoupled
+    /// from "what score does it get?".
+    pub fn is_allowlisted_gateway(&self, addr: &Address) -> bool {
+        self.gateway_weights.contains_key(addr)
+    }
+
     /// Build a policy in-memory. Used by tests in other modules; production
     /// code paths go through [`PolicyConfig::load`].
     #[cfg(test)]
@@ -171,10 +185,13 @@ pub fn compute_priority(tx: &TxEnvelope, policy: &PolicyConfig) -> U256 {
 
     let bid_component = match tx.to() {
         Some(to) => match policy.gateway_weights.get(&to).copied() {
-            Some(weight) => {
-                let raw = gateway_bid_amount(tx).unwrap_or_else(|| tx.value());
-                raw.saturating_mul(U256::from(weight))
-            }
+            Some(weight) => match gateway_bid_amount(tx) {
+                Some(raw) => raw.saturating_mul(U256::from(weight)),
+                // Only the explicit `magmaSearcherGatewayCall` path counts as a bid.
+                // Plain `receive()` top-ups (or any other calldata to the gateway) are
+                // operational deposits, not searcher bids — see module docs.
+                None => U256::ZERO,
+            },
             None => U256::ZERO,
         },
         None => U256::ZERO,
@@ -184,8 +201,8 @@ pub fn compute_priority(tx: &TxEnvelope, policy: &PolicyConfig) -> U256 {
 }
 
 /// Decode the `bidAmount` argument of `MagmaSearcherGateway.magmaSearcherGatewayCall`
-/// from the tx's calldata. Returns `None` when the selector doesn't match (so the
-/// caller can fall back to `tx.value` for plain gateway top-ups).
+/// from the tx's calldata. Returns `None` when the selector doesn't match; the caller
+/// treats that as a zero bid (we do not fall back to `tx.value` — see module docs).
 fn gateway_bid_amount(tx: &TxEnvelope) -> Option<U256> {
     let input = tx.input();
     if input.len() < 4 {
@@ -199,6 +216,24 @@ fn gateway_bid_amount(tx: &TxEnvelope) -> Option<U256> {
     let call =
         IMagmaSearcherGateway::magmaSearcherGatewayCallCall::abi_decode_raw(&input[4..]).ok()?;
     Some(call.bidAmount)
+}
+
+/// Build calldata for `magmaSearcherGatewayCall(sender, bidAmount, searcher, data)`.
+///
+/// Test-only helper, shared across modules so tests for the txpool IPC layer can
+/// exercise the same bid-decoding path as the policy tests without duplicating
+/// the ABI encoder.
+#[cfg(test)]
+pub(crate) fn gateway_call_calldata(bid_amount: U256) -> alloy_primitives::Bytes {
+    use alloy_primitives::{address, Bytes};
+    IMagmaSearcherGateway::magmaSearcherGatewayCallCall {
+        sender: address!("00000000000000000000000000000000000000ee"),
+        bidAmount: bid_amount,
+        searcherContract: address!("00000000000000000000000000000000000000ff"),
+        searcherCallData: Bytes::from_static(b"opaque"),
+    }
+    .abi_encode()
+    .into()
 }
 
 fn effective_priority_fee_per_gas(tx: &TxEnvelope, base_fee_floor: u128) -> u128 {
@@ -218,7 +253,6 @@ mod tests {
 
     use alloy_consensus::{Signed, TxEip1559, TxEnvelope, TxLegacy};
     use alloy_primitives::{address, b256, Bytes, Signature, TxKind};
-    use alloy_sol_types::SolCall;
 
     fn dummy_sig() -> Signature {
         // arbitrary values; we never verify recovery in these tests.
@@ -269,9 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn eip1559_with_gateway_value() {
-        // Empty calldata to a gateway: the `receive()` payable path. The bid
-        // component falls back to `tx.value`.
+    fn eip1559_gateway_receive_topup_does_not_count_value_as_bid() {
+        // Empty calldata to a gateway is the `receive()` payable path: an operational
+        // top-up, not a `magmaSearcherGatewayCall` bid. We deliberately do NOT credit
+        // `tx.value` as a bid — score collapses to the priority-fee component only.
         let gw = address!("00000000000000000000000000000000000000bb");
         let tx = signed_eip1559(TxEip1559 {
             chain_id: 1,
@@ -285,20 +320,8 @@ mod tests {
             input: Default::default(),
         });
         let policy = policy_with_gateway(gw, 1);
-        // 5*21_000 + 1_000_000 = 1_105_000
-        assert_eq!(compute_priority(&tx, &policy), U256::from(1_105_000u64));
-    }
-
-    /// Build calldata for `magmaSearcherGatewayCall(sender, bidAmount, searcher, data)`.
-    fn gateway_call_calldata(bid_amount: U256) -> Bytes {
-        IMagmaSearcherGateway::magmaSearcherGatewayCallCall {
-            sender: address!("00000000000000000000000000000000000000ee"),
-            bidAmount: bid_amount,
-            searcherContract: address!("00000000000000000000000000000000000000ff"),
-            searcherCallData: Bytes::from_static(b"opaque"),
-        }
-        .abi_encode()
-        .into()
+        // 5 * 21_000 + 0 = 105_000
+        assert_eq!(compute_priority(&tx, &policy), U256::from(105_000u64));
     }
 
     #[test]
@@ -341,9 +364,10 @@ mod tests {
     }
 
     #[test]
-    fn gateway_with_unknown_selector_falls_back_to_value() {
-        // Calldata with a non-matching 4-byte prefix: we can't decode a bid, so
-        // the bid component falls back to `tx.value`.
+    fn gateway_with_unknown_selector_gets_zero_bid() {
+        // Calldata with a non-matching 4-byte prefix: we can't decode a bid, so the bid
+        // component is zero (no `tx.value` fallback). Otherwise anyone could buy priority
+        // by sending native value to the gateway with a junk selector.
         let gw = address!("00000000000000000000000000000000000000bb");
         let mut bogus = vec![0xde, 0xad, 0xbe, 0xef];
         bogus.extend_from_slice(&[0u8; 32]);
@@ -359,12 +383,14 @@ mod tests {
             input: Bytes::from(bogus),
         });
         let policy = policy_with_gateway(gw, 1);
-        // 5 * 21_000 + 2_000 = 107_000
-        assert_eq!(compute_priority(&tx, &policy), U256::from(107_000u64));
+        // 5 * 21_000 + 0 = 105_000
+        assert_eq!(compute_priority(&tx, &policy), U256::from(105_000u64));
     }
 
     #[test]
-    fn gateway_weight_scales_value_component() {
+    fn gateway_weight_does_not_apply_to_receive_topup() {
+        // Weight only multiplies a *decoded* `bidAmount`. A `receive()` top-up has no
+        // bid to multiply, so the weight is irrelevant — score is just the priority fee.
         let gw = address!("00000000000000000000000000000000000000bb");
         let tx = signed_eip1559(TxEip1559 {
             chain_id: 1,
@@ -378,12 +404,13 @@ mod tests {
             input: Default::default(),
         });
         let policy = policy_with_gateway(gw, 3);
-        // 5*21_000 + 3*1_000 = 105_000 + 3_000 = 108_000
-        assert_eq!(compute_priority(&tx, &policy), U256::from(108_000u64));
+        // 5 * 21_000 + 0 = 105_000   (weight has no bid to multiply)
+        assert_eq!(compute_priority(&tx, &policy), U256::from(105_000u64));
     }
 
     #[test]
-    fn weight_zero_ignores_value() {
+    fn weight_zero_zeroes_decoded_bid() {
+        // Decoded `bidAmount = 1_000`, weight = 0 → bid component is zeroed regardless.
         let gw = address!("00000000000000000000000000000000000000bb");
         let tx = signed_eip1559(TxEip1559 {
             chain_id: 1,
@@ -392,9 +419,9 @@ mod tests {
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 5,
             to: TxKind::Call(gw),
-            value: U256::from(1_000u64),
+            value: U256::ZERO,
             access_list: Default::default(),
-            input: Default::default(),
+            input: gateway_call_calldata(U256::from(1_000u64)),
         });
         let policy = policy_with_gateway(gw, 0);
         assert_eq!(compute_priority(&tx, &policy), U256::from(105_000u64));
