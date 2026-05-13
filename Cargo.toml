@@ -15,6 +15,7 @@ path = "src/main.rs"
 # Bump the rev together to keep the wire format in sync; both crates must come from the same tree.
 alloy-consensus = "1.8"
 alloy-primitives = "1.5"
+alloy-sol-types = "1.5"
 axum = { version = "0.7", features = ["json"] }
 clap = { version = "4.2", features = ["derive", "env"] }
 futures = "0.3"

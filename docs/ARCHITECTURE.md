@@ -7,14 +7,14 @@ The model is **naive, tip-based MEV**: searchers compete for inclusion order thr
 ## Goals
 
 - Collect MEV bids in a **single contract surface** (`MagmaSearcherGateway`) so fee rules are enforceable on-chain.
-- Have the **magma-sidecar** observe the node's txpool and **assign per-tx priority based on tips** (priority fee + value paid to the gateway), so the node orders MEV-relevant txs ahead of vanilla traffic.
+- Have the **magma-sidecar** observe the node's txpool and **assign per-tx priority based on tips** (priority fee + bid paid to the gateway), so the node orders MEV-relevant txs ahead of vanilla traffic.
 - Drive ordering with **tips**, enforced through the node's existing priority surface.
 
 ## End-to-end data flow
 
 **Ingress:** Searchers submit transactions either **directly to the Monad node's JSON-RPC** or **to magma-sidecar's HTTP ingress** (which forwards into the node's RPC). Either way, they land in the node's txpool.
 
-**Reprioritization:** magma-sidecar is connected to the node's **txpool IPC** and observes `EthTxPoolEvent`s. For each inserted transaction it computes a **priority** from the tx's tip (priority fee + measurable value transferred to `MagmaSearcherGateway`) and re-injects the tx with that priority over IPC. The node uses the supplied priority when constructing the next block.
+**Reprioritization:** magma-sidecar is connected to the node's **txpool IPC** and observes `EthTxPoolEvent`s. For each inserted transaction it computes a **priority** from the tx's tip (priority fee + bid declared to `MagmaSearcherGateway`, decoded from `magmaSearcherGatewayCall` calldata) and re-injects the tx with that priority over IPC. The node uses the supplied priority when constructing the next block.
 
 ```mermaid
 flowchart LR
@@ -44,7 +44,7 @@ flowchart LR
 - **`MagmaSearcherGateway`**: entrypoint that forwards to a searcher implementation and enforces a minimum **net native-token gain** on the gateway contract balance.
 - **`MagmaSearcher`** (base): authorization, gateway-only entry, and repayment of the bid to the gateway in ETH.
 - Searchers implement MEV logic; **fees accumulate on the gateway** for later settlement (or future withdrawal paths).
-- The gateway is the on-chain anchor for the sidecar's tip computation: value flowing into `MagmaSearcherGateway` during a tx is treated as part of that tx's effective tip when ranking it.
+- The gateway is the on-chain anchor for the sidecar's tip computation: the `bidAmount` declared on a `magmaSearcherGatewayCall` (and, for plain top-ups via the gateway's `receive()`, `tx.value`) is treated as part of that tx's effective tip when ranking it.
 
 ### Magma sidecar (this repository)
 
@@ -69,13 +69,16 @@ The sidecar's priority is a **tip-based score**:
 
 ```
 tip(tx) = effective_priority_fee(tx) * gas_used(tx)
-       + value_routed_to_MagmaSearcherGateway(tx)
+       + bid_routed_to_MagmaSearcherGateway(tx) * gateway_weight
 ```
 
 - `effective_priority_fee` is the EIP-1559 priority fee component the validator would receive.
-- `value_routed_to_MagmaSearcherGateway` is the sidecar's read of value flowing into the gateway during the tx, statically detectable from `to` + `value` for direct sends.
+- `bid_routed_to_MagmaSearcherGateway` is read statically from the signed tx when `to` is an allowlisted gateway:
+  - if calldata is a `magmaSearcherGatewayCall(address sender, uint256 bidAmount, address searcherContract, bytes searcherCallData)`, the sidecar decodes `bidAmount` from calldata. This is the on-chain enforced minimum net ETH gain on the gateway contract, so it is the right number to rank by — and `magmaSearcherGatewayCall` is `nonpayable`, so `tx.value` is always 0 on this path.
+  - otherwise the sidecar falls back to `tx.value` (the gateway's `receive()` payable path: a direct top-up to the gateway).
+- `gateway_weight` is a per-gateway multiplier (default 1) declared in the policy file; setting it to 0 ignores an allowlisted gateway entirely.
 
-The score is mapped into the IPC priority field (a `U256`-shaped slot in `EthTxPoolIpcTx`); ordering is per-tx by tip. The plumbing is policy-agnostic, so richer policies (e.g. backrun pairing, gateway-allowlist boosts) can replace the scoring function in place.
+The score is mapped into the IPC priority field (a `U256`-shaped slot in `EthTxPoolIpcTx`); ordering is per-tx by tip. The plumbing is policy-agnostic, so richer policies (e.g. backrun pairing, sub-call attribution) can replace the scoring function in place.
 
 The `--tx-priority` constant serves as a fallback for txs the sidecar elects not to recompute (e.g. echoes, malformed input).
 
@@ -91,8 +94,8 @@ These items affect **classification quality**, **ingress**, and **reward routing
 
 ### Tip classification fidelity
 
-- The naive policy reads what is statically derivable from the signed tx: priority fee, `to`, `value`, and known calldata patterns.
-- A future tightening: read gateway-emitted events / use `monad-bft` speculative state to attribute bid amounts post-hoc and feed them into priority for the next block.
+- The naive policy reads what is statically derivable from the signed tx: priority fee, `to`, `value`, and the `bidAmount` argument of `magmaSearcherGatewayCall`. This requires the gateway to be the direct `to` of the tx; wrapper / proxy calls that reach the gateway via a sub-call are not currently attributed.
+- A future tightening: read gateway-emitted events / use `monad-bft` speculative state to attribute bid amounts post-hoc (including sub-call paths) and feed them into priority for the next block.
 
 ### Transaction ingress
 
@@ -115,7 +118,7 @@ These items affect **classification quality**, **ingress**, and **reward routing
 | Term | Meaning |
 |------|--------|
 | **Gateway** | `MagmaSearcherGateway`—on-chain sink for enforced bids |
-| **Tip** | Priority fee component + value routed to the gateway in the same tx |
+| **Tip** | Priority fee component + bid declared to the gateway (via `magmaSearcherGatewayCall`'s `bidAmount`, or `tx.value` for plain top-ups) in the same tx |
 | **Reprioritizing** | Sidecar re-injects a tx over IPC with a tip-derived priority so the node orders it ahead of vanilla traffic |
 
 ---

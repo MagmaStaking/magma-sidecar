@@ -49,10 +49,10 @@ cargo run --release -- \
   --monad-rpc-url http://127.0.0.1:8545 \
   --txpool-socket /path/to/mempool.sock \
   --policy-config /path/to/policy.toml \
-  --tx-priority 0xffff
+  --tx-priority-hex 0xffff
 ```
 
-Without `--policy-config`, the sidecar falls back to stamping every `Insert` with the constant `--tx-priority` (legacy mode).
+Without `--policy-config`, the sidecar falls back to stamping every `Insert` with the constant `--tx-priority-hex` (legacy mode).
 
 ### Tip policy file (TOML)
 
@@ -62,7 +62,7 @@ Without `--policy-config`, the sidecar falls back to stamping every `Insert` wit
 base_fee_floor_wei = 0
 
 # Allowlist of MagmaSearcherGateway contracts. `weight` (default 1) scales the
-# value-routed-into-gateway component of the score; set to 0 to ignore an entry.
+# bid-into-gateway component of the score; set to 0 to ignore an entry.
 [[gateway]]
 address = "0x00000000000000000000000000000000000000aa"
 weight  = 1
@@ -72,7 +72,12 @@ label   = "MagmaSearcherGateway (mainnet)"
 address = "0x00000000000000000000000000000000000000bb"
 ```
 
-The score is `priority_fee × gas_limit + Σ value_into_allowlisted_gateway × weight`. See `docs/ARCHITECTURE.md` §"Priority policy" and `src/policy.rs` for the precise definition.
+The score is `priority_fee × gas_limit + bid_into_allowlisted_gateway × weight`, where the bid is:
+
+- the `bidAmount` argument decoded from `magmaSearcherGatewayCall(address sender, uint256 bidAmount, address searcherContract, bytes searcherCallData)` calldata when `to == gateway` and the selector matches (the on-chain enforced minimum net ETH gain on the gateway contract; see `mev-entrypoint`), or
+- `tx.value` when `to == gateway` but calldata is empty / non-matching (the gateway's `receive()` payable path, e.g. an off-chain operator topping it up directly).
+
+See `docs/ARCHITECTURE.md` §"Priority policy" and `src/policy.rs` for the precise definition.
 
 Environment (optional):
 
@@ -80,7 +85,7 @@ Environment (optional):
 - `MAGMA_MONAD_RPC_URL` — Monad JSON-RPC base URL (target of `/rpc/monad`)
 - `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC
 - `MAGMA_POLICY_CONFIG` — path to the TOML tip policy
-- `MAGMA_TX_PRIORITY` — fallback hex priority for outbound `EthTxPoolIpcTx` (default `0xffff`)
+- `MAGMA_TX_PRIORITY` — fallback hex priority for outbound `EthTxPoolIpcTx` (default `0xffff`, CLI flag `--tx-priority-hex`)
 - `RUST_LOG` — e.g. `info,magma_sidecar=debug`
 
 ### Example: forward a raw tx via the sidecar
@@ -102,6 +107,6 @@ curl -s http://127.0.0.1:8089/rpc/monad \
 
 The implementation now matches `docs/ARCHITECTURE.md`. Open follow-ups:
 
-- **Tighten gateway-value detection:** today only direct `to == gateway` sends contribute; richer attribution (event-based, sub-call value flows) is the "future tightening" called out in the architecture doc §"Tip classification fidelity".
+- **Tighten bid attribution beyond direct calls:** today the bid component is read from `magmaSearcherGatewayCall` calldata or `tx.value`, both of which require `to == gateway`. Sub-call attribution (a wrapper / proxy that calls the gateway internally) and event-based readback are the "future tightening" called out in the architecture doc §"Tip classification fidelity".
 - **Backrun pairing & richer policies:** the `PriorityMode::Policy` decision is per-tx; pair-aware scoring would be a new mode behind the same surface.
 - **Integration test against a fake IPC socket:** the IPC loop's I/O path is currently exercised end-to-end only in dev (`docs/LOCAL_DEVELOPMENT.md`).

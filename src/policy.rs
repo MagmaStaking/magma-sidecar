@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! tip(tx) = effective_priority_fee(tx) * gas_used(tx)
-//!        + value_routed_to_MagmaSearcherGateway(tx)
+//!        + bid_routed_to_MagmaSearcherGateway(tx)
 //! ```
 //!
 //! At txpool time we don't have execution results or the next-block base fee, so:
@@ -15,17 +15,44 @@
 //!   `base_fee_floor = 0` this is `max_priority_fee_per_gas` for EIP-1559 and
 //!   `gas_price` for legacy/EIP-2930 — the latter is a generous upper bound, but
 //!   that matches the design's "naive, tip-based MEV" framing.
-//! - `value_routed_to_MagmaSearcherGateway` is the statically detectable case from
-//!   `to` + `value`. Per-gateway multipliers in the policy file let us weight
-//!   trusted gateways without changing code; richer detection (event-based,
-//!   sub-call attribution) is the follow-up tightening called out in the doc.
+//! - `bid_routed_to_MagmaSearcherGateway` is the statically detectable bid into
+//!   an allowlisted gateway in the same tx. Two cases:
+//!   1. `to == gateway` AND calldata is `magmaSearcherGatewayCall(address,
+//!      uint256 bidAmount, address, bytes)` — we decode `bidAmount` from
+//!      calldata. This is the on-chain enforced minimum net ETH gain on the
+//!      gateway (see `mev-entrypoint/src/MagmaSearcherGateway.sol`) and is the
+//!      right number to rank by, since `magmaSearcherGatewayCall` is
+//!      `nonpayable` and so `tx.value` is always 0 on this path.
+//!   2. `to == gateway` with non-matching/empty calldata — we fall back to
+//!      `tx.value` (the gateway's `receive()` payable path: an off-chain
+//!      operator topping up the gateway directly).
+//!
+//!   Per-gateway multipliers in the policy file let us weight trusted gateways
+//!   without changing code; richer attribution (event-based, sub-call value
+//!   flows that bypass the direct `to == gateway` invariant) remains the
+//!   follow-up tightening called out in the doc.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_primitives::{Address, U256};
+use alloy_sol_types::{sol, SolCall};
 use serde::Deserialize;
+
+sol! {
+    /// ABI for `MagmaSearcherGateway.magmaSearcherGatewayCall`. We only use the
+    /// generated `SELECTOR` and `abi_decode` — no contract binding needed.
+    #[allow(missing_docs)]
+    interface IMagmaSearcherGateway {
+        function magmaSearcherGatewayCall(
+            address sender,
+            uint256 bidAmount,
+            address searcherContract,
+            bytes searcherCallData
+        ) external;
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PolicyError {
@@ -142,15 +169,36 @@ pub fn compute_priority(tx: &TxEnvelope, policy: &PolicyConfig) -> U256 {
     let gas_limit = tx.gas_limit() as u128;
     let fee_component = U256::from(priority_fee).saturating_mul(U256::from(gas_limit));
 
-    let value_component = match tx.to() {
+    let bid_component = match tx.to() {
         Some(to) => match policy.gateway_weights.get(&to).copied() {
-            Some(weight) => tx.value().saturating_mul(U256::from(weight)),
+            Some(weight) => {
+                let raw = gateway_bid_amount(tx).unwrap_or_else(|| tx.value());
+                raw.saturating_mul(U256::from(weight))
+            }
             None => U256::ZERO,
         },
         None => U256::ZERO,
     };
 
-    fee_component.saturating_add(value_component)
+    fee_component.saturating_add(bid_component)
+}
+
+/// Decode the `bidAmount` argument of `MagmaSearcherGateway.magmaSearcherGatewayCall`
+/// from the tx's calldata. Returns `None` when the selector doesn't match (so the
+/// caller can fall back to `tx.value` for plain gateway top-ups).
+fn gateway_bid_amount(tx: &TxEnvelope) -> Option<U256> {
+    let input = tx.input();
+    if input.len() < 4 {
+        return None;
+    }
+    let selector: [u8; 4] = input[..4].try_into().ok()?;
+    if selector != IMagmaSearcherGateway::magmaSearcherGatewayCallCall::SELECTOR {
+        return None;
+    }
+    // `abi_decode_raw` consumes the args portion (without the 4-byte selector).
+    let call =
+        IMagmaSearcherGateway::magmaSearcherGatewayCallCall::abi_decode_raw(&input[4..]).ok()?;
+    Some(call.bidAmount)
 }
 
 fn effective_priority_fee_per_gas(tx: &TxEnvelope, base_fee_floor: u128) -> u128 {
@@ -169,7 +217,8 @@ mod tests {
     use super::*;
 
     use alloy_consensus::{Signed, TxEip1559, TxEnvelope, TxLegacy};
-    use alloy_primitives::{address, b256, Signature, TxKind};
+    use alloy_primitives::{address, b256, Bytes, Signature, TxKind};
+    use alloy_sol_types::SolCall;
 
     fn dummy_sig() -> Signature {
         // arbitrary values; we never verify recovery in these tests.
@@ -221,6 +270,8 @@ mod tests {
 
     #[test]
     fn eip1559_with_gateway_value() {
+        // Empty calldata to a gateway: the `receive()` payable path. The bid
+        // component falls back to `tx.value`.
         let gw = address!("00000000000000000000000000000000000000bb");
         let tx = signed_eip1559(TxEip1559 {
             chain_id: 1,
@@ -236,6 +287,80 @@ mod tests {
         let policy = policy_with_gateway(gw, 1);
         // 5*21_000 + 1_000_000 = 1_105_000
         assert_eq!(compute_priority(&tx, &policy), U256::from(1_105_000u64));
+    }
+
+    /// Build calldata for `magmaSearcherGatewayCall(sender, bidAmount, searcher, data)`.
+    fn gateway_call_calldata(bid_amount: U256) -> Bytes {
+        IMagmaSearcherGateway::magmaSearcherGatewayCallCall {
+            sender: address!("00000000000000000000000000000000000000ee"),
+            bidAmount: bid_amount,
+            searcherContract: address!("00000000000000000000000000000000000000ff"),
+            searcherCallData: Bytes::from_static(b"opaque"),
+        }
+        .abi_encode()
+        .into()
+    }
+
+    #[test]
+    fn gateway_call_uses_decoded_bid_amount() {
+        let gw = address!("00000000000000000000000000000000000000bb");
+        let tx = signed_eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 5,
+            to: TxKind::Call(gw),
+            // Non-payable on-chain, so always 0 in practice.
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: gateway_call_calldata(U256::from(7_000_000u64)),
+        });
+        let policy = policy_with_gateway(gw, 1);
+        // 5 * 21_000 + 7_000_000 = 7_105_000
+        assert_eq!(compute_priority(&tx, &policy), U256::from(7_105_000u64));
+    }
+
+    #[test]
+    fn gateway_call_weight_scales_bid_amount() {
+        let gw = address!("00000000000000000000000000000000000000bb");
+        let tx = signed_eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 5,
+            to: TxKind::Call(gw),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: gateway_call_calldata(U256::from(1_000u64)),
+        });
+        let policy = policy_with_gateway(gw, 3);
+        // 5 * 21_000 + 3 * 1_000 = 108_000
+        assert_eq!(compute_priority(&tx, &policy), U256::from(108_000u64));
+    }
+
+    #[test]
+    fn gateway_with_unknown_selector_falls_back_to_value() {
+        // Calldata with a non-matching 4-byte prefix: we can't decode a bid, so
+        // the bid component falls back to `tx.value`.
+        let gw = address!("00000000000000000000000000000000000000bb");
+        let mut bogus = vec![0xde, 0xad, 0xbe, 0xef];
+        bogus.extend_from_slice(&[0u8; 32]);
+        let tx = signed_eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 5,
+            to: TxKind::Call(gw),
+            value: U256::from(2_000u64),
+            access_list: Default::default(),
+            input: Bytes::from(bogus),
+        });
+        let policy = policy_with_gateway(gw, 1);
+        // 5 * 21_000 + 2_000 = 107_000
+        assert_eq!(compute_priority(&tx, &policy), U256::from(107_000u64));
     }
 
     #[test]
