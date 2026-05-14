@@ -1,0 +1,27 @@
+# Build artifacts (massive; rebuilt inside the image via cache mounts).
+target/
+
+# Version control (not needed in build context).
+.git/
+.gitignore
+
+# Local config & secrets — never bake into the image.
+.env
+.env.*
+!.env.example
+*.local.toml
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Logs / debug
+*.log
+
+# Docker meta (referencing itself isn't useful inside the context).
+Dockerfile
+.dockerignore

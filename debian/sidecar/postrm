@@ -1,0 +1,41 @@
+#!/bin/sh
+# postrm — runs after removal. On `purge`, also drop the enable-state metadata
+# so a future re-install starts from a clean slate.
+
+set -e
+
+UNIT=magma-sidecar.service
+
+case "$1" in
+    remove)
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload >/dev/null || true
+        fi
+        ;;
+
+    purge)
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper purge "${UNIT}" >/dev/null || true
+            deb-systemd-helper unmask "${UNIT}" >/dev/null || true
+        fi
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload >/dev/null || true
+        fi
+        # /etc/magma-sidecar/sidecar.env is operator state created at runtime,
+        # not a packaged conffile, so dpkg won't sweep it. Tidy up so `purge`
+        # really means purge.
+        rm -f /etc/magma-sidecar/sidecar.env
+        rmdir --ignore-fail-on-non-empty /etc/magma-sidecar 2>/dev/null || true
+        ;;
+
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        : # nothing to do
+        ;;
+
+    *)
+        echo "postrm called with unknown argument '$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

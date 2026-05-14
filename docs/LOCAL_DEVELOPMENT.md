@@ -1,23 +1,14 @@
-# Local development: Monad single node, emulated beacon, rbuilder, and Magma gateway
+# Local development: Monad single node + magma-sidecar + Magma gateway
 
-This guide wires together a **local Monad devnet** (single-node Docker stack with **WebSocket RPC**), the **emulated beacon** (subscribes to Monad over WS and exposes beacon-style SSE for rbuilder), **`rbuilder`** with the Monad-oriented config, and the **Magma searcher gateway** plus counter test contracts from **`mev-entrypoint`**. When everything is up, you can run the **counter-conflict** Makefile flow to exercise competing bundles.
+This guide wires together a **local Monad devnet** (single-node Docker stack), the **magma-sidecar** (HTTP ingress + txpool IPC reprioritization), and the **Magma searcher gateway** plus counter test contracts from **`mev-entrypoint`**. When everything is up, you can run the **counter-conflict** flow to exercise competing tip-bearing transactions and verify that the sidecar orders them by tip.
 
 Paths below use these repo roots (adjust to your clone locations):
 
 | Repo | Role |
 |------|------|
-| `monad-bft` | Consensus + execution + `monad-rpc` (HTTP + WS) |
-| `rbuilder-private` | `emulated-beacon-via-rpc`, `rbuilder`, `config-monad-local.toml`, optional **`mev-test-contract/rust-tester`** (MevTest + bundle Makefile) |
-| `mev-entrypoint` | Solidity gateway/searchers; **`test-scripts/`** = Magma gateway + counter-conflict bundles |
-
-There are **two** bundle-based conflict testers you may use:
-
-| Path | Contract story | Typical commands |
-|------|----------------|-------------------|
-| **`mev-entrypoint/test-scripts/`** | `MagmaSearcherGateway` + shared counter + two `MagmaTipSearcher`s | `make deploy`, `make bundles`, `make counter-read` |
-| **`rbuilder-private/mev-test-contract/rust-tester/`** | `MevTest.sol` + Rust tester | `make env-setup`, edit `local.env`, `make deploy-contract NETWORK=local`, `make test-bundles NETWORK=local` |
-
-The steps below (Monad → emulated beacon → deploy → rbuilder) are shared; only the **test harness** directory differs.
+| `monad-bft` | Consensus + execution + `monad-rpc` (HTTP) + txpool IPC socket |
+| `magma-sidecar` (this repo) | HTTP ingress (`/rpc/monad`) + txpool IPC reprioritization |
+| `mev-entrypoint` | Solidity gateway/searchers; **`test-scripts/`** = Magma gateway + counter-conflict scenario |
 
 ## Architecture
 
@@ -26,35 +17,34 @@ flowchart LR
   subgraph monad["monad-bft Docker single-node"]
     MN[monad-node]
     ME[monad execution]
-    MR["monad-rpc\nHTTP :8080 + WS :8081"]
+    MR["monad-rpc\nHTTP :8080"]
+    SOCK["/monad/mempool.sock\ntxpool IPC"]
     MN --> ME
     ME --> MR
+    MN --> SOCK
+    MR --> SOCK
   end
 
-  EB["emulated-beacon-via-rpc\nSSE :3502"]
-  MR -->|"WS eth_subscribe"| EB
+  SC["magma-sidecar :8089\n(HTTP + IPC)"]
+  MR -->|"forwarded JSON-RPC"| SC
+  SC -->|"eth_sendRawTransaction"| MR
+  SOCK <-->|"EthTxPoolEvent / EthTxPoolIpcTx"| SC
 
-  RB[rbuilder :8645]
-  MR -->|"HTTP eth_* / state"| RB
-  EB -->|"CL SSE cl_node_url"| RB
-
-  GW[On-chain tests\nMagma or MevTest]
-  RB -->|"eth_sendBundle"| GW
-  MR -->|"forge / cast"| GW
-
-  TS[Conflict test Makefile]
-  TS --> RB
-  TS --> MR
+  GW[On-chain tests\nMagmaSearcherGateway + counter]
+  MR -->|"forge / cast deploy"| GW
+  TS[Conflict test driver]
+  TS -->|"eth_sendRawTransaction"| SC
+  TS -->|"cast call"| MR
 ```
 
-**Ports (defaults)**
+**Ports / paths (defaults)**
 
-| Port | Service |
+| Port / path | Service |
 |------|---------|
 | 8080 | Monad JSON-RPC (HTTP) |
-| 8081 | Monad WebSocket (`eth_subscribe`; required for emulated beacon) |
-| 3502 | Emulated beacon SSE (beacon-compatible events for rbuilder `cl_node_url`) |
-| 8645 | rbuilder JSON-RPC (`eth_sendBundle`, builder APIs) |
+| 8081 | Monad WebSocket (`eth_subscribe`) — available, not required for this flow |
+| 8089 | magma-sidecar HTTP (`/rpc/monad`, `/health`) |
+| `docker/single-node/logs/<run>/node/mempool.sock` | Monad txpool IPC socket (per-run host path) — consumed by the sidecar |
 
 ## Prerequisites
 
@@ -64,7 +54,7 @@ flowchart LR
 
 ---
 
-## 1. Start Monad single-node with WebSocket enabled
+## 1. Start Monad single-node
 
 From the **`monad-bft`** repository:
 
@@ -77,7 +67,7 @@ nets/run.sh --use-prebuilt
 
 **From-source build** (slower): omit `--use-prebuilt` — `nets/run.sh` will build images from the repo as in the monad-bft README.
 
-Either way, Compose brings up RPC on **8080** and, in current `nets/compose.yaml`, **`monad-rpc` starts with `--ws-enabled`** and maps **8081** for the WebSocket listener. That WS endpoint is what **`emulated-beacon-via-rpc`** uses (`ws://127.0.0.1:8081/` by default).
+Compose brings up `monad-node` and `monad-rpc`, exposes RPC on **8080** (HTTP) and **8081** (WS), and shares the txpool socket at **`/monad/mempool.sock`** inside the containers. On the host, each `nets/run.sh` invocation creates a fresh per-run volume directory and mounts it as the container's `/monad`, so the socket appears on the host as `docker/single-node/logs/<YYYYMMDD_HHMMSS-hash>/node/mempool.sock`.
 
 Sanity checks:
 
@@ -86,27 +76,99 @@ curl -s -X POST http://127.0.0.1:8080 \
   -H "Content-Type: application/json" \
   --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}'
 # expect chain id 20143 (0x4eaf)
+
+# locate the socket from the most recent run:
+ls -td docker/single-node/logs/*/node/mempool.sock | head -1
+# expect a Unix socket
 ```
 
 To reuse a previous volume and skip a full rebuild, use `nets/run.sh --cached-build <path-to-log-vol>` as described in the monad-bft README.
 
----
+### 1a. Make the txpool socket reachable from the host
 
-## 2. Run emulated beacon (subscribes to Monad WS → SSE for rbuilder)
+The execution container creates `mempool.sock` as `root:root` with mode `0755` (no `user:` mapping in `nets/compose.yaml`), and the per-run host path under `logs/<timestamp>-<hash>/node/...` typically lands at exactly **108 bytes** — one over the kernel's `AF_UNIX` `sun_path` limit of 107 usable bytes. Either alone is enough to make `connect(2)` fail; together they will produce a tight retry loop in the sidecar (`txpool IPC connect failed; retrying ...`).
 
-From **`rbuilder-private`** (workspace root):
+After `nets/run.sh` is up, run this once per run from a `sudo`-capable shell to fix both:
 
 ```bash
-cd /path/to/rbuilder-private
-cargo run -p emulated-beacon-via-rpc -- --config monad-testnet
+SOCK=$(ls -td /path/to/monad-bft/docker/single-node/logs/*/node/mempool.sock | head -1)
+
+# 1. Allow your host user to connect (write bit on the socket inode)
+sudo chmod 666 "$SOCK"
+
+# 2. Expose it under a short path that fits in sun_path
+sudo ln -sf "$SOCK" /tmp/monad-mempool.sock
+ls -lL /tmp/monad-mempool.sock   # sanity: srw-rw-rw-
 ```
 
-Config file: `crates/emulated-beacon-via-rpc/config/monad-testnet.toml`. It sets:
+The kernel resolves symlinks during pathname lookup, so only the path you pass to `connect(2)` (here `/tmp/monad-mempool.sock`, ~23 bytes) needs to fit in 108 bytes — the underlying long path on disk is fine.
 
-- `consensus_ws_url = "ws://localhost:8081/"`
-- `port = 3502` (HTTP server for beacon-style SSE used as **CL** by rbuilder)
+> Re-run these two commands every time you do a fresh `nets/run.sh`; the new run creates a brand-new socket with default perms.
 
-You can switch `subscription_type` between `"newHeads"` and `"monadNewHeads"` depending on whether you want finalized vs speculative heads (see `crates/emulated-beacon-via-rpc/README.md`).
+---
+
+## 2. Build and run magma-sidecar
+
+From this repo (**`magma-sidecar`**):
+
+```bash
+cd /path/to/magma-sidecar
+cargo build --release
+```
+
+### Configure once via `.env.local`
+
+The repo ships a committed `.env.example` template; copy it to a gitignored `.env.local` and edit any values that differ for your machine. Every variable maps 1:1 to a CLI flag in `src/config.rs` (CLI > env > default), so you can override anything ad-hoc on the command line later.
+
+```bash
+cp .env.example .env.local   # first time only; the file is gitignored
+# (the defaults already match the docker single-node stack from §1)
+```
+
+Then load it into your shell and run the sidecar with no flags:
+
+```bash
+set -a; source .env.local; set +a
+cargo run --release
+```
+
+This wires up:
+
+- `MAGMA_SIDECAR_BIND=0.0.0.0:8089`
+- `MAGMA_MONAD_RPC_URL=http://127.0.0.1:8080`
+- `MAGMA_TXPOOL_SOCKET=/tmp/monad-mempool.sock` — the short symlink from §1a
+- `MAGMA_NETWORK=localnet` — selects the local-devnet gateway address baked into `src/policy.rs`
+- `MAGMA_TX_PRIORITY=0xffff` — fallback priority
+- `RUST_LOG=info,magma_sidecar=debug` — surfaces the per-tx "reinjecting" / "skipping" lines
+
+A successful attach logs `connected to Monad txpool IPC path=/tmp/monad-mempool.sock`. If you see `txpool IPC connect failed; retrying`, revisit §1a — the socket either isn't writable by your user or the path you passed is over 107 bytes.
+
+To exercise the tip-scoring policy locally, set `MAGMA_NETWORK=localnet`; the gateway address is the one written by `make deploy` in `mev-entrypoint/test-scripts/` (deterministic for anvil account #0 at nonce 0). Without `MAGMA_NETWORK`, every `Insert` is stamped with the constant `MAGMA_TX_PRIORITY` and the gateway-only filter is bypassed — useful for ingress-only smoke tests, not for scoring.
+
+#### Override on the command line when you want to
+
+Anything in `.env.local` is just the default — you can still override per-invocation:
+
+```bash
+cargo run --release -- --bind 0.0.0.0:9000 --txpool-socket /tmp/other.sock
+```
+
+Verify:
+
+```bash
+curl -s http://127.0.0.1:8089/health | jq
+# {"status":"ok","ipc_state":"connected","tx_inserts_observed":N,"tx_prioritized":N,"tx_skipped_non_gateway":N,...}
+
+curl -s http://127.0.0.1:8089/metrics | head
+# # HELP magma_sidecar_txpool_ipc_state ...
+
+curl -s -X POST http://127.0.0.1:8089/rpc/monad \
+  -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}'
+# expect 0x4eaf via Monad
+```
+
+The sidecar logs `txpool_ipc=...` when it attaches to the socket, and emits `EthTxPoolIpcTx` reinjections with a tip-derived priority for each `Insert` event it observes.
 
 Leave this process running.
 
@@ -126,81 +188,128 @@ make deploy
 
 `make deploy` broadcasts `DeployCounterSearchers` and writes **`deployments.local.env`** with `GATEWAY`, `COUNTER`, `SEARCHER_A`, and `SEARCHER_B`. Defaults in the Makefile match Anvil-style dev keys and `RPC_URL=http://127.0.0.1:8080`.
 
----
-
-## 4. Point rbuilder at Monad + emulated beacon (and your gateway)
-
-Use **`rbuilder-private/config-monad-local.toml`**. Important fields:
-
-- **`chain`**: `examples/config/rbuilder/monad-devnet-genesis.json` (matches devnet chain id **20143**)
-- **`cl_node_url`**: `["http://127.0.0.1:3502"]` — must match the emulated beacon **HTTP** port
-- **`[rpc_provider].rpc_url`**: `http://127.0.0.1:8080`
-- **`mev_profit_addresses`**: set to the **`GATEWAY`** address from `deployments.local.env` so the builder attributes native ETH paid to the gateway toward MEV profit (replace the placeholder in the file if needed)
-
-Validate and run from **`rbuilder-private`** root:
+You can target the deploy through the sidecar's `/rpc/monad` ingress instead of the node directly by overriding:
 
 ```bash
-cd /path/to/rbuilder-private
-cargo run -p rbuilder --bin validate-config -- --config config-monad-local.toml
-cargo run -p rbuilder --bin rbuilder -- run config-monad-local.toml
+make deploy RPC_URL=http://127.0.0.1:8089/rpc/monad
 ```
 
-rbuilder listens on **8645** by default (`jsonrpc_server_port`).
-
-**Startup order:** Monad (8080/8081) → emulated beacon (3502) → deploy contracts → **update `mev_profit_addresses`** → rbuilder (8645). If you start rbuilder before deploy, restart it after updating the gateway address in the config.
+Both paths land the deployment txs in the same Monad txpool.
 
 ---
 
-## 5. Test a conflict (choose one harness)
+## 4. Submit competing tip-bearing transactions
 
-### A. Magma gateway + counter (`mev-entrypoint/test-scripts`)
+The new flow drives `MagmaTipSearcher` directly with `eth_sendRawTransaction`; the sidecar observes both txs on the txpool, scores each by **priority fee + value paid into `MagmaSearcherGateway`**, and re-injects them with that priority. Only one `increment` can land per block (`BlockLimitedCounter`), so the higher-tip tx should win.
 
-With **Monad**, **emulated beacon**, **rbuilder**, and **deployed contracts** from [§3](#3-deploy-the-magma-gateway-and-counter-test-stack) all running:
+Two ways to drive it:
+
+### A. `cast send` (manual, no harness changes needed)
+
+Source the deployment vars and submit two competing `execute` calls in the same block window. Direct each at the sidecar so the ingress path matches production:
 
 ```bash
 cd /path/to/mev-entrypoint/test-scripts
-make bundles
+set -a; source deployments.local.env; set +a
+
+SIDECAR=http://127.0.0.1:8089/rpc/monad
+
+# searcher A — tip 0.001 ETH
+cast send "$SEARCHER_A" \
+  "execute(uint256)" 1000000000000000 \
+  --rpc-url "$SIDECAR" \
+  --private-key "$PRIVATE_KEY_A" \
+  --value 1000000000000000 \
+  --async
+
+# searcher B — tip 0.002 ETH
+cast send "$SEARCHER_B" \
+  "execute(uint256)" 2000000000000000 \
+  --rpc-url "$SIDECAR" \
+  --private-key "$PRIVATE_KEY_B" \
+  --value 2000000000000000 \
+  --async
 ```
 
-This uses **`RBUILDER_URL=http://127.0.0.1:8645`** and **`RPC_URL=http://127.0.0.1:8080`** by default, loads addresses from **`deployments.local.env`**, and runs the Rust tool to submit two bundles with different tips (see Makefile `bundles` target).
-
-Read on-chain state:
+Read which one landed:
 
 ```bash
 make counter-read
+# count() should bump by 1; lastIncrementBlock() should match the inclusion block
 ```
 
-Other useful targets: `make help`, `make save-deployments` (refresh env from Foundry broadcast without redeploying).
+Re-run with different `--value` / function-arg pairs to confirm the higher-tip tx consistently wins.
 
-### B. `MevTest` + Rust tester (`rbuilder-private/mev-test-contract/rust-tester`)
+> The `execute(uint256)` selector and value semantics here are illustrative — match them to the actual `MagmaTipSearcher` interface in `mev-entrypoint/test-scripts/contracts/MagmaTipSearcher.sol` (the on-chain entrypoint that calls `MagmaSearcherGateway` and pays `bidAmount`).
 
-Submodule: ensure `mev-test-contract/lib/forge-std` is present (`git submodule update --init --recursive` in `rbuilder-private` if needed).
+### B. `make bundles` (after harness update)
 
-From **`rbuilder-private/mev-test-contract/rust-tester`**:
+The existing `make bundles` target submits to `RBUILDER_URL` via `eth_sendBundle`. In the new architecture, that target is being repointed to submit two pre-signed `eth_sendRawTransaction`s to the sidecar's `/rpc/monad` ingress instead. Once that change lands, the workflow becomes:
 
-1. **Point `local.env` at Monad devnet** (default template uses `8545`; for this stack use **8080**):
+```bash
+cd /path/to/mev-entrypoint/test-scripts
+make bundles SIDECAR_URL=http://127.0.0.1:8089/rpc/monad
+make counter-read
+```
 
-   ```bash
-   make env-setup   # once; then edit local.env
-   # Set RPC_URL=http://127.0.0.1:8080 and wallet keys (see Makefile help output)
-   ```
-
-2. Deploy **`MevTest`** and run bundle tests (expects **rbuilder on 8645** — the Makefile checks with `nc` for `NETWORK=local`):
-
-   ```bash
-   make deploy-contract NETWORK=local
-   make test-bundles NETWORK=local
-   ```
-
-See `make help` for `test`, `test-bundles-deploy`, and other targets. This path does **not** use `MagmaSearcherGateway`; it drives the standalone **`MevTest`** contract under `mev-test-contract/src/`.
+Track the harness update in `mev-entrypoint/test-scripts/`.
 
 ---
 
-## Quick reference: four terminals
+## Quick reference
 
-1. **`monad-bft`**: `cd docker/single-node && nets/run.sh --use-prebuilt` (optional: customize `nets/compose.prebuilt.yaml`)
-2. **`rbuilder-private`**: `cargo run -p emulated-beacon-via-rpc -- --config monad-testnet`
-3. **`rbuilder-private`**: `cargo run -p rbuilder --bin rbuilder -- run config-monad-local.toml` (after setting `mev_profit_addresses` for the Magma path)
-4. **Conflict test**: either `mev-entrypoint/test-scripts` (`make deploy` → `make bundles`) **or** `rbuilder-private/mev-test-contract/rust-tester` (`make deploy-contract NETWORK=local` → `make test-bundles NETWORK=local` with `RPC_URL` **8080**)
+Three terminals plus a one-shot fix-up after each fresh `nets/run.sh`:
 
-End-to-end data path: **WS-enabled Monad** → **emulated CL (SSE)** → **rbuilder** (payload attributes + `eth_sendBundle`) → **on-chain test contracts** → **Makefile-driven conflict run**.
+1. **`monad-bft`**: `cd docker/single-node && nets/run.sh --use-prebuilt`
+2. **Socket fix-up** (per fresh run, see §1a — not a long-running process): `SOCK=$(ls -td /path/to/monad-bft/docker/single-node/logs/*/node/mempool.sock | head -1) && sudo chmod 666 "$SOCK" && sudo ln -sf "$SOCK" /tmp/monad-mempool.sock`
+3. **`magma-sidecar`**: `set -a; source .env.local; set +a; cargo run --release` (one-time setup: `cp .env.example .env.local`)
+4. **Conflict test**: `cd mev-entrypoint/test-scripts && make deploy && cast send ...` (see §4)
+
+End-to-end data path: **searcher tx → magma-sidecar `/rpc/monad`** → **Monad txpool** → **magma-sidecar reads `EthTxPoolEvent`s, scores by tip, re-injects with priority** → **node honors priority for next block** → **on-chain test contracts**.
+
+---
+
+## Troubleshooting
+
+### `txpool IPC connect failed; retrying path=/tmp/monad-mempool.sock`
+
+The sidecar is reaching a socket path, but `connect(2)` is being rejected. In a local single-node setup this is almost always one of three things; check them in order.
+
+**1. Stale symlink from a previous `nets/run.sh`.** Each invocation of `nets/run.sh` mints a brand-new per-run dir under `docker/single-node/logs/<timestamp>-<hash>/node/mempool.sock` (see §1, §1a). The previous run's socket file is left on disk after its containers exit, so connecting to it fails with `ECONNREFUSED` rather than `ENOENT` — and the sidecar log just says "connect failed; retrying", not "stale symlink". Compare what the symlink points at against the currently-running containers:
+
+```bash
+# what /tmp/monad-mempool.sock currently resolves to
+ls -l /tmp/monad-mempool.sock
+
+# what's actually running right now
+docker ps --format '{{.Names}}' | grep monad
+# e.g. 20260505_103428-4b99f5ec7e445b1c-monad_node-1
+
+# newest run dir on disk
+ls -td /path/to/monad-bft/docker/single-node/logs/*/node/mempool.sock | head -1
+```
+
+If the timestamp/hash in the symlink target doesn't match the timestamp/hash in the container names, redo §1a against the newest run. Use `ln -sfn` (not `ln -sf`) so the symlink is replaced atomically rather than dropped *inside* the old target dir if it happens to still exist:
+
+```bash
+SOCK=$(ls -td /path/to/monad-bft/docker/single-node/logs/*/node/mempool.sock | head -1)
+sudo chmod 666 "$SOCK"
+sudo ln -sfn "$SOCK" /tmp/monad-mempool.sock
+ls -lL /tmp/monad-mempool.sock   # expect: srw-rw-rw-
+```
+
+**2. Permissions.** The execution container creates the socket as `root:root` mode `0755` (no write bit for others), so `connect(2)` from your host user gets `EACCES`. `sudo chmod 666 "$SOCK"` from §1a fixes it; `ls -lL /tmp/monad-mempool.sock` should show `srw-rw-rw-`.
+
+**3. `sun_path` length.** The host path `…/logs/<timestamp>-<hash>/node/mempool.sock` typically lands at exactly 108 bytes — one over the kernel's `AF_UNIX` `sun_path` limit of 107 usable bytes. Connecting via the long path fails with `ENAMETOOLONG`; the `/tmp/monad-mempool.sock` symlink (~23 bytes) is what makes it fit. If you see this error while pointing `MAGMA_TXPOOL_SOCKET` at the long path directly, switch back to the short symlink.
+
+After any of these fixes, the sidecar should log `connected to Monad txpool IPC path=/tmp/monad-mempool.sock` on the next reconnect attempt without needing a restart.
+
+### `eth_chainId` works on `:8089` but no `Insert` events are observed
+
+`/rpc/monad` is just an HTTP forwarder to `monad-rpc:8080`, so a working `eth_chainId` round-trip only proves the HTTP leg is healthy — it says nothing about the txpool IPC leg. Check `/health`:
+
+```bash
+curl -s http://127.0.0.1:8089/health | jq
+```
+
+If `ipc_state` is anything other than `"connected"`, you're back in the troubleshooting case above. If it's `"connected"` but `tx_inserts_observed` stays at 0 while you submit txs, the txs are being rejected upstream (signature, nonce, base fee, chain id) before they ever reach the pool — check `monad-rpc` logs.

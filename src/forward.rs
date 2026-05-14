@@ -1,4 +1,4 @@
-//! HTTP forwarding helpers for JSON-RPC to rbuilder and Monad.
+//! HTTP forwarding helpers for JSON-RPC to the Monad EL.
 
 use reqwest::Client;
 
@@ -12,12 +12,7 @@ pub async fn forward_jsonrpc(
     timeout: std::time::Duration,
 ) -> Result<reqwest::Response, reqwest::Error> {
     let url = base_url.trim_end_matches('/');
-    client
-        .post(url)
-        .json(&body)
-        .timeout(timeout)
-        .send()
-        .await
+    client.post(url).json(&body).timeout(timeout).send().await
 }
 
 pub fn build_client(_config: &Config) -> Result<Client, reqwest::Error> {

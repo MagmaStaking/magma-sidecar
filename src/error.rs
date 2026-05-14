@@ -14,13 +14,10 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, msg) =         match &self {
+        let (status, msg) = match &self {
             AppError::Upstream(e) => {
                 tracing::error!(error = %e, "upstream error");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("upstream error: {e}"),
-                )
+                (StatusCode::BAD_GATEWAY, format!("upstream error: {e}"))
             }
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             AppError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m.clone()),

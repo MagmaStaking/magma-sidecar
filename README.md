@@ -1,34 +1,137 @@
 # magma-sidecar
 
-Rust **sidecar** between **searchers / rbuilder** and the **Monad** node, aligned with [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Rust **sidecar** for a Monad validator. It does two things, both described in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md):
 
-This repo is intentionally **separate** from **`monad-bft`** (its own Cargo project, not a workspace member of the node repo). It provides **HTTP bridging** (ingress to rbuilder, egress of signed builder bundles to Monad) plus optional **txpool IPC** priority streaming (same framing/RLP as `monad-eth-txpool-ipc` in `monad-bft`).
+1. **HTTP ingress** for searchers — `POST /rpc/monad` transparently forwards JSON-RPC (e.g. `eth_sendRawTransaction`) into the Monad EL.
+2. **Txpool IPC reprioritization** — connects to the node's txpool Unix socket, observes `EthTxPoolEvent`s, and re-injects each transaction with a **tip-derived priority** so the node orders MEV-relevant traffic ahead of vanilla traffic.
 
-## Build
+This repo is intentionally **separate** from `monad-bft` (its own Cargo project, not a workspace member of the node repo). It pulls `monad-eth-txpool-ipc` and `monad-eth-txpool-types` straight from the upstream **`category-labs/monad-bft`** repo, pinned to a specific commit in `Cargo.toml`.
 
-`Cargo.toml` uses **path dependencies** into a sibling checkout of `monad-bft` for the IPC crates:
+## Installation
 
-- `../monad-bft/monad-eth-txpool-ipc`
-- `../monad-bft/monad-eth-txpool-types`
+Three supported install paths, in roughly recommended order for production use. For local development against a Monad devnet, jump to [Run from source](#run-from-source) and [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md).
 
-Place `magma-sidecar` and `monad-bft` next to each other (or edit those paths). Then:
+### Option 1: Debian package via APT (recommended for validator hosts)
+
+Hosts a versioned `.deb` with a systemd unit, dropped under `monad:monad` so it has the right uid to read the node's txpool IPC socket.
+
+```bash
+# Add the Magma APT repo and signing key (one-time).
+sudo mkdir -p /etc/apt/keyrings
+sudo wget -qO /etc/apt/keyrings/magma.gpg https://magma-apt-repo.s3.amazonaws.com/magma-apt-key.gpg.bin
+echo "deb [signed-by=/etc/apt/keyrings/magma.gpg] https://magma-apt-repo.s3.amazonaws.com stable main" \
+  | sudo tee /etc/apt/sources.list.d/magma.list
+sudo apt update
+
+# Install.
+sudo apt install magma-sidecar
+# Or a specific version:  sudo apt install magma-sidecar=1.0.0
+
+# Configure: at minimum set MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, and
+# MAGMA_NETWORK (mainnet | testnet | localnet). The gateway address for each
+# network is baked into the binary; no extra config file to drop in.
+sudo $EDITOR /etc/magma-sidecar/sidecar.env
+
+# Start.
+sudo systemctl enable --now magma-sidecar
+sudo systemctl status magma-sidecar
+sudo journalctl -u magma-sidecar -f
+```
+
+The Debian package ships:
+
+- Binary: `/usr/bin/magma-sidecar`
+- Systemd unit: `/lib/systemd/system/magma-sidecar.service` (runs as `User=monad`, hardened, `Restart=always`)
+- Config template: `/etc/magma-sidecar/sidecar.env.example`
+
+The `postinst` script seeds `/etc/magma-sidecar/sidecar.env` from the example **only on first install** — upgrades never clobber operator-edited config.
+
+You can also grab a release `.deb` directly from [GitHub Releases](https://github.com/hydrogen-labs/magma-sidecar/releases) (`amd64` + `arm64` are both published) and `sudo dpkg -i magma-sidecar_<version>_<arch>.deb` if you don't want the APT repo.
+
+### Option 2: Docker (recommended for non-validator use cases — gateways, dev, k8s)
+
+Multi-arch images at `ghcr.io/hydrogen-labs/magma-sidecar` (`linux/amd64` + `linux/arm64`).
+
+```bash
+docker pull ghcr.io/hydrogen-labs/magma-sidecar:latest
+# Or pin: ghcr.io/hydrogen-labs/magma-sidecar:1.0.0
+
+# Ingress-only (no txpool IPC reprioritization).
+docker run --rm -p 8089:8089 \
+  -e MAGMA_MONAD_RPC_URL=http://host.docker.internal:8545 \
+  ghcr.io/hydrogen-labs/magma-sidecar:latest
+```
+
+For txpool IPC mode, bind-mount the node's socket and a policy file — see the comment block at the top of [`Dockerfile`](Dockerfile) for the full incantation (the AF_UNIX 107-byte path limit comes up here; [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md) §1a has the workaround).
+
+### Option 3: Build from source
 
 ```bash
 cd magma-sidecar
 cargo build --release
 ```
 
-## What it does
+The first build clones `monad-bft` into `~/.cargo/git/` (a few hundred MB, one-time cost). Subsequent builds reuse the cache. To upgrade the IPC protocol version, bump the `rev` on **both** `monad-eth-txpool-ipc` and `monad-eth-txpool-types` together — they must come from the same tree to keep the wire format in sync.
+
+If you'd rather develop against a local checkout (e.g. while changing the IPC protocol in lockstep), point both crates at a sibling checkout instead:
+
+```toml
+monad-eth-txpool-ipc   = { path = "../monad-bft/monad-eth-txpool-ipc" }
+monad-eth-txpool-types = { path = "../monad-bft/monad-eth-txpool-types" }
+```
+
+To produce a `.deb` from a local checkout (the same flow CI uses), prefer the [Makefile](Makefile):
+
+```bash
+make help                                 # list every target
+make build-deb                            # native-arch .deb in build/
+make build-deb-arm64                      # cross via `cross`
+make install                              # sudo dpkg -i the latest build/*.deb
+make service-status                       # systemctl status magma-sidecar
+make purge                                # sudo dpkg --purge magma-sidecar
+```
+
+Or invoke the script directly (e.g. for non-Make environments):
+
+```bash
+./debian/sidecar/build-deb.sh 0.1.0-local            # native arch
+./debian/sidecar/build-deb.sh 0.1.0-local arm64      # cross via `cross`
+sudo dpkg -i build/magma-sidecar_0.1.0-local_*.deb
+```
+
+## Service management
+
+For the Debian-installed service:
+
+```bash
+sudo systemctl start magma-sidecar      # start
+sudo systemctl stop magma-sidecar       # stop
+sudo systemctl restart magma-sidecar    # restart (after editing sidecar.env)
+sudo systemctl status magma-sidecar     # current state + last few log lines
+sudo systemctl enable magma-sidecar     # start on boot
+sudo systemctl disable magma-sidecar    # don't start on boot
+
+sudo journalctl -u magma-sidecar -f     # follow logs
+sudo journalctl -u magma-sidecar -n 200 # last 200 lines
+```
+
+To override systemd-managed bits without editing the shipped unit:
+
+```bash
+sudo systemctl edit magma-sidecar
+# In the drop-in editor:
+# [Service]
+# Environment="RUST_LOG=info,magma_sidecar=debug"
+```
+
+## Surfaces
 
 | Surface | Purpose |
-|--------|---------|
-| `GET /health` | Liveness JSON |
-| `POST /rpc/rbuilder` | Forward JSON-RPC body to rbuilder (`eth_sendBundle`, `eth_sendRawTransaction`, …) |
-| `POST /rpc/monad` | Forward JSON-RPC body to Monad EL (escape hatch) |
-| `POST /v1/submit-builder-bundle` | Body = signed bundle params; sidecar wraps `monad_submitBuilderBundle` and POSTs to Monad |
-| **Txpool IPC** (optional) | `--txpool-socket` connects to the node’s txpool Unix socket, consumes `EthTxPoolEvent` batches, and sends RLP `EthTxPoolIpcTx` with configurable priority before the node applies ordering. |
-
-Signing for `monad_submitBuilderBundle` stays in **rbuilder** (or your tool); the sidecar only forwards the JSON-RPC to `MAGMA_MONAD_RPC_URL`.
+|---------|---------|
+| `GET /health` | Structured liveness: IPC state, counters, last-event/last-send timestamps |
+| `GET /metrics` | Prometheus exposition (counters, gauges; namespaced `magma_sidecar_*`) |
+| `POST /rpc/monad` | Forward JSON-RPC body to the Monad EL (`eth_sendRawTransaction`, `eth_chainId`, …) |
+| **Txpool IPC** (optional) | `--txpool-socket` connects to the node's txpool Unix socket, consumes `EthTxPoolEvent` batches, and (in policy mode) re-injects only `Insert`s targeting an allowlisted `MagmaSearcherGateway` as `EthTxPoolIpcTx` with a tip-based priority. |
 
 ## Run
 
@@ -36,59 +139,71 @@ Signing for `monad_submitBuilderBundle` stays in **rbuilder** (or your tool); th
 cd magma-sidecar
 cargo run --release -- \
   --bind 0.0.0.0:8089 \
-  --monad-rpc-url http://127.0.0.1:8545 \
-  --rbuilder-rpc-url http://127.0.0.1:8645
+  --monad-rpc-url http://127.0.0.1:8545
 ```
 
-**Optional txpool IPC** (same socket the node exposes for `EthTxPoolIpcClient`):
+**With txpool IPC + tip policy** (same socket the node exposes for `EthTxPoolIpcClient`):
 
 ```bash
 cargo run --release -- \
   --bind 0.0.0.0:8089 \
   --monad-rpc-url http://127.0.0.1:8545 \
-  --rbuilder-rpc-url http://127.0.0.1:8645 \
   --txpool-socket /path/to/mempool.sock \
-  --tx-priority 0xffff
+  --network localnet \
+  --tx-priority-hex 0xffff
 ```
 
-Environment (optional):
+In policy mode the sidecar **only reinjects** transactions whose `to` is the network's allowlisted `MagmaSearcherGateway` — vanilla traffic is observed (so `tx_inserts_observed` still climbs) but left alone, so the node's default ordering applies and the sidecar doesn't fight other reprioritizers (e.g. `fastlane-sidecar`) for unrelated txs. Skipped txs are counted in `txpool_skipped_non_gateway_total`.
+
+Without `--network`, the sidecar falls back to stamping every `Insert` with the constant `--tx-priority-hex` (legacy mode, no gateway filter — only suitable for single-tenant local dev).
+
+### Networks and the gateway address
+
+There is exactly one `MagmaSearcherGateway` per network. The address is baked into [`src/policy.rs`](src/policy.rs) so a gateway redeploy ships as a versioned binary rather than an ops change:
+
+| `--network` | Gateway address | Notes |
+|---|---|---|
+| `mainnet` | (TODO: real address) | placeholder until the mainnet gateway is deployed |
+| `testnet` | (TODO: real address) | placeholder until the testnet gateway is deployed |
+| `localnet` | `0x8f86403a4de0bb5791fa46b8e795c547942fe4cf` | deterministic deployment from `mev-entrypoint/test-scripts/make deploy` against the local Monad devnet |
+
+The score is `priority_fee × gas_limit + bid`, where the bid is:
+
+- the `bidAmount` argument decoded from `magmaSearcherGatewayCall(address sender, uint256 bidAmount, address searcherContract, bytes searcherCallData)` calldata when `to == gateway` and the selector matches (the on-chain enforced minimum net ETH gain on the gateway contract; see `mev-entrypoint`), or
+- **zero** for any other call to the gateway (empty calldata, a non-matching selector, a direct `receive()` top-up). We deliberately do not credit `tx.value`: a `receive()` deposit is an operational top-up, not a searcher bid declared as a minimum net gain, and treating it as one would let anyone buy priority by sending native value to the gateway.
+
+See `docs/ARCHITECTURE.md` §"Priority policy" and `src/policy.rs` for the precise definition.
+
+Environment (optional, every variable maps 1:1 to a CLI flag — CLI > env > default):
 
 - `MAGMA_SIDECAR_BIND` — default `127.0.0.1:8089`
-- `MAGMA_MONAD_RPC_URL` — Monad JSON-RPC base URL
-- `MAGMA_RBUILDER_RPC_URL` — rbuilder incoming JSON-RPC base URL
-- `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC (see above)
-- `MAGMA_TX_PRIORITY` — hex priority for outbound `EthTxPoolIpcTx` (default `0xffff`)
+- `MAGMA_MONAD_RPC_URL` — Monad JSON-RPC base URL (target of `/rpc/monad`)
+- `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC
+- `MAGMA_NETWORK` — `mainnet` | `testnet` | `localnet` (omit to disable gateway scoring)
+- `MAGMA_TX_PRIORITY` — fallback hex priority for outbound `EthTxPoolIpcTx` (default `0xffff`, CLI flag `--tx-priority-hex`)
 - `RUST_LOG` — e.g. `info,magma_sidecar=debug`
 
-### Example: forward a bundle to rbuilder via sidecar
+For local dev, copy `.env.example` to `.env.local` (gitignored), edit anything host-specific, then `set -a; source .env.local; set +a; cargo run --release` — see [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md) §2 for the full flow.
 
-Point your client at the sidecar instead of rbuilder directly:
+### Example: forward a raw tx via the sidecar
 
-```bash
-curl -s http://127.0.0.1:8089/rpc/rbuilder \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"eth_sendBundle","params":[...],"id":1}'
-```
-
-### Example: submit pre-signed builder bundle to Monad
+Point your client at the sidecar instead of the node directly:
 
 ```bash
-curl -s http://127.0.0.1:8089/v1/submit-builder-bundle \
+curl -s http://127.0.0.1:8089/rpc/monad \
   -H 'Content-Type: application/json' \
-  -d '{
-    "transactions": ["0f8b..."],
-    "signature": "...",
-    "signer": "...",
-    "timestamp": 1234567890
-  }'
+  -d '{"jsonrpc":"2.0","method":"eth_sendRawTransaction","params":["0x..."],"id":1}'
 ```
 
 ## Related repos
 
-- `mev-entrypoint` — `MagmaSearcherGateway` contracts  
-- `rbuilder-private` — block builder, `mev_profit_addresses`, Monad bundle signing  
-- `monad-bft` — node (txpool IPC protocol lives here; this repo links to it only via `path` deps for types)  
+- `mev-entrypoint` — `MagmaSearcherGateway` contracts and test scripts
+- `monad-bft` — node (txpool IPC protocol lives here; this repo links via `path` deps for types)
 
 ## Roadmap
 
-- Prometheus metrics (`/metrics`) if needed for ops.
+The implementation now matches `docs/ARCHITECTURE.md`. Open follow-ups:
+
+- **Tighten bid attribution beyond direct calls:** today the bid component is read only from `magmaSearcherGatewayCall` calldata, which requires `to == gateway`. Sub-call attribution (a wrapper / proxy that calls the gateway internally) and event-based readback are the "future tightening" called out in the architecture doc §"Tip classification fidelity".
+- **Backrun pairing & richer policies:** the `PriorityMode::Policy` decision is per-tx; pair-aware scoring would be a new mode behind the same surface.
+- **Integration test against a fake IPC socket:** the IPC loop's I/O path is currently exercised end-to-end only in dev (`docs/LOCAL_DEVELOPMENT.md`).

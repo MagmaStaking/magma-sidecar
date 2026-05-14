@@ -4,10 +4,14 @@
 
 # Cargo.lock: keep committed for reproducible builds of this binary.
 
+# .deb build output (debian/sidecar/build-deb.sh)
+/build/
+
 # Local / secrets
 .env
 .env.*
 !.env.example
+*.local.toml
 
 # Editors & OS
 .idea
