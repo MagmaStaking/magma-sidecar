@@ -8,16 +8,16 @@
 #             -e MAGMA_MONAD_RPC_URL=http://host.docker.internal:8545 \
 #             magma-sidecar
 #
-# With txpool IPC + policy (bind-mount the node's socket dir and the policy
-# file; keep the in-container socket path short to stay under the AF_UNIX
-# 107-byte limit, see docs/LOCAL_DEVELOPMENT.md §1a):
+# With txpool IPC + network policy (bind-mount the node's socket dir; pick the
+# network whose gateway should be scored. Keep the in-container socket path
+# short to stay under the AF_UNIX 107-byte limit, see
+# docs/LOCAL_DEVELOPMENT.md §1a):
 #
 #   docker run --rm -p 8089:8089 \
 #     -v /run/monad:/run/monad:ro \
-#     -v $PWD/policy.local.toml:/etc/magma/policy.toml:ro \
 #     -e MAGMA_MONAD_RPC_URL=http://host.docker.internal:8545 \
 #     -e MAGMA_TXPOOL_SOCKET=/run/monad/mempool.sock \
-#     -e MAGMA_POLICY_CONFIG=/etc/magma/policy.toml \
+#     -e MAGMA_NETWORK=localnet \
 #     magma-sidecar
 
 ARG RUST_VERSION=1.91

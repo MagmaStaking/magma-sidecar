@@ -7,7 +7,64 @@ Rust **sidecar** for a Monad validator. It does two things, both described in [`
 
 This repo is intentionally **separate** from `monad-bft` (its own Cargo project, not a workspace member of the node repo). It pulls `monad-eth-txpool-ipc` and `monad-eth-txpool-types` straight from the upstream **`category-labs/monad-bft`** repo, pinned to a specific commit in `Cargo.toml`.
 
-## Build
+## Installation
+
+Three supported install paths, in roughly recommended order for production use. For local development against a Monad devnet, jump to [Run from source](#run-from-source) and [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md).
+
+### Option 1: Debian package via APT (recommended for validator hosts)
+
+Hosts a versioned `.deb` with a systemd unit, dropped under `monad:monad` so it has the right uid to read the node's txpool IPC socket.
+
+```bash
+# Add the Magma APT repo and signing key (one-time).
+sudo mkdir -p /etc/apt/keyrings
+sudo wget -qO /etc/apt/keyrings/magma.gpg https://magma-apt-repo.s3.amazonaws.com/magma-apt-key.gpg.bin
+echo "deb [signed-by=/etc/apt/keyrings/magma.gpg] https://magma-apt-repo.s3.amazonaws.com stable main" \
+  | sudo tee /etc/apt/sources.list.d/magma.list
+sudo apt update
+
+# Install.
+sudo apt install magma-sidecar
+# Or a specific version:  sudo apt install magma-sidecar=1.0.0
+
+# Configure: at minimum set MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, and
+# MAGMA_NETWORK (mainnet | testnet | localnet). The gateway address for each
+# network is baked into the binary; no extra config file to drop in.
+sudo $EDITOR /etc/magma-sidecar/sidecar.env
+
+# Start.
+sudo systemctl enable --now magma-sidecar
+sudo systemctl status magma-sidecar
+sudo journalctl -u magma-sidecar -f
+```
+
+The Debian package ships:
+
+- Binary: `/usr/bin/magma-sidecar`
+- Systemd unit: `/lib/systemd/system/magma-sidecar.service` (runs as `User=monad`, hardened, `Restart=always`)
+- Config template: `/etc/magma-sidecar/sidecar.env.example`
+
+The `postinst` script seeds `/etc/magma-sidecar/sidecar.env` from the example **only on first install** — upgrades never clobber operator-edited config.
+
+You can also grab a release `.deb` directly from [GitHub Releases](https://github.com/hydrogen-labs/magma-sidecar/releases) (`amd64` + `arm64` are both published) and `sudo dpkg -i magma-sidecar_<version>_<arch>.deb` if you don't want the APT repo.
+
+### Option 2: Docker (recommended for non-validator use cases — gateways, dev, k8s)
+
+Multi-arch images at `ghcr.io/hydrogen-labs/magma-sidecar` (`linux/amd64` + `linux/arm64`).
+
+```bash
+docker pull ghcr.io/hydrogen-labs/magma-sidecar:latest
+# Or pin: ghcr.io/hydrogen-labs/magma-sidecar:1.0.0
+
+# Ingress-only (no txpool IPC reprioritization).
+docker run --rm -p 8089:8089 \
+  -e MAGMA_MONAD_RPC_URL=http://host.docker.internal:8545 \
+  ghcr.io/hydrogen-labs/magma-sidecar:latest
+```
+
+For txpool IPC mode, bind-mount the node's socket and a policy file — see the comment block at the top of [`Dockerfile`](Dockerfile) for the full incantation (the AF_UNIX 107-byte path limit comes up here; [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md) §1a has the workaround).
+
+### Option 3: Build from source
 
 ```bash
 cd magma-sidecar
@@ -21,6 +78,50 @@ If you'd rather develop against a local checkout (e.g. while changing the IPC pr
 ```toml
 monad-eth-txpool-ipc   = { path = "../monad-bft/monad-eth-txpool-ipc" }
 monad-eth-txpool-types = { path = "../monad-bft/monad-eth-txpool-types" }
+```
+
+To produce a `.deb` from a local checkout (the same flow CI uses), prefer the [Makefile](Makefile):
+
+```bash
+make help                                 # list every target
+make build-deb                            # native-arch .deb in build/
+make build-deb-arm64                      # cross via `cross`
+make install                              # sudo dpkg -i the latest build/*.deb
+make service-status                       # systemctl status magma-sidecar
+make purge                                # sudo dpkg --purge magma-sidecar
+```
+
+Or invoke the script directly (e.g. for non-Make environments):
+
+```bash
+./debian/sidecar/build-deb.sh 0.1.0-local            # native arch
+./debian/sidecar/build-deb.sh 0.1.0-local arm64      # cross via `cross`
+sudo dpkg -i build/magma-sidecar_0.1.0-local_*.deb
+```
+
+## Service management
+
+For the Debian-installed service:
+
+```bash
+sudo systemctl start magma-sidecar      # start
+sudo systemctl stop magma-sidecar       # stop
+sudo systemctl restart magma-sidecar    # restart (after editing sidecar.env)
+sudo systemctl status magma-sidecar     # current state + last few log lines
+sudo systemctl enable magma-sidecar     # start on boot
+sudo systemctl disable magma-sidecar    # don't start on boot
+
+sudo journalctl -u magma-sidecar -f     # follow logs
+sudo journalctl -u magma-sidecar -n 200 # last 200 lines
+```
+
+To override systemd-managed bits without editing the shipped unit:
+
+```bash
+sudo systemctl edit magma-sidecar
+# In the drop-in editor:
+# [Service]
+# Environment="RUST_LOG=info,magma_sidecar=debug"
 ```
 
 ## Surfaces
@@ -48,36 +149,28 @@ cargo run --release -- \
   --bind 0.0.0.0:8089 \
   --monad-rpc-url http://127.0.0.1:8545 \
   --txpool-socket /path/to/mempool.sock \
-  --policy-config /path/to/policy.toml \
+  --network localnet \
   --tx-priority-hex 0xffff
 ```
 
-In policy mode the sidecar **only reinjects** transactions whose `to` is one of the allowlisted gateways below — vanilla traffic is observed (so `tx_inserts_observed` still climbs) but left alone, so the node's default ordering applies and the sidecar doesn't fight other reprioritizers (e.g. `fastlane-sidecar`) for unrelated txs. Skipped txs are counted in `txpool_skipped_non_gateway_total`.
+In policy mode the sidecar **only reinjects** transactions whose `to` is the network's allowlisted `MagmaSearcherGateway` — vanilla traffic is observed (so `tx_inserts_observed` still climbs) but left alone, so the node's default ordering applies and the sidecar doesn't fight other reprioritizers (e.g. `fastlane-sidecar`) for unrelated txs. Skipped txs are counted in `txpool_skipped_non_gateway_total`.
 
-Without `--policy-config`, the sidecar falls back to stamping every `Insert` with the constant `--tx-priority-hex` (legacy mode, no gateway filter — only suitable for single-tenant local dev).
+Without `--network`, the sidecar falls back to stamping every `Insert` with the constant `--tx-priority-hex` (legacy mode, no gateway filter — only suitable for single-tenant local dev).
 
-### Tip policy file (TOML)
+### Networks and the gateway address
 
-```toml
-# Optional: floor the priority-fee component for legacy/EIP-2930 txs whose
-# `gas_price` overstates the proposer-visible tip when base fee > 0.
-base_fee_floor_wei = 0
+There is exactly one `MagmaSearcherGateway` per network. The address is baked into [`src/policy.rs`](src/policy.rs) so a gateway redeploy ships as a versioned binary rather than an ops change:
 
-# Allowlist of MagmaSearcherGateway contracts. `weight` (default 1) scales the
-# bid-into-gateway component of the score; set to 0 to ignore an entry.
-[[gateway]]
-address = "0x00000000000000000000000000000000000000aa"
-weight  = 1
-label   = "MagmaSearcherGateway (mainnet)"
+| `--network` | Gateway address | Notes |
+|---|---|---|
+| `mainnet` | (TODO: real address) | placeholder until the mainnet gateway is deployed |
+| `testnet` | (TODO: real address) | placeholder until the testnet gateway is deployed |
+| `localnet` | `0x8f86403a4de0bb5791fa46b8e795c547942fe4cf` | deterministic deployment from `mev-entrypoint/test-scripts/make deploy` against the local Monad devnet |
 
-[[gateway]]
-address = "0x00000000000000000000000000000000000000bb"
-```
-
-The score (only computed for txs whose `to == an allowlisted gateway`; everything else is skipped) is `priority_fee × gas_limit + bid_into_allowlisted_gateway × weight`, where the bid is:
+The score is `priority_fee × gas_limit + bid`, where the bid is:
 
 - the `bidAmount` argument decoded from `magmaSearcherGatewayCall(address sender, uint256 bidAmount, address searcherContract, bytes searcherCallData)` calldata when `to == gateway` and the selector matches (the on-chain enforced minimum net ETH gain on the gateway contract; see `mev-entrypoint`), or
-- **zero** for any other call to a gateway (empty calldata, a non-matching selector, a direct `receive()` top-up). We deliberately do not credit `tx.value`: a `receive()` deposit is an operational top-up, not a searcher bid declared as a minimum net gain, and treating it as one would let anyone buy priority by sending native value to the gateway.
+- **zero** for any other call to the gateway (empty calldata, a non-matching selector, a direct `receive()` top-up). We deliberately do not credit `tx.value`: a `receive()` deposit is an operational top-up, not a searcher bid declared as a minimum net gain, and treating it as one would let anyone buy priority by sending native value to the gateway.
 
 See `docs/ARCHITECTURE.md` §"Priority policy" and `src/policy.rs` for the precise definition.
 
@@ -86,7 +179,7 @@ Environment (optional, every variable maps 1:1 to a CLI flag — CLI > env > def
 - `MAGMA_SIDECAR_BIND` — default `127.0.0.1:8089`
 - `MAGMA_MONAD_RPC_URL` — Monad JSON-RPC base URL (target of `/rpc/monad`)
 - `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC
-- `MAGMA_POLICY_CONFIG` — path to the TOML tip policy
+- `MAGMA_NETWORK` — `mainnet` | `testnet` | `localnet` (omit to disable gateway scoring)
 - `MAGMA_TX_PRIORITY` — fallback hex priority for outbound `EthTxPoolIpcTx` (default `0xffff`, CLI flag `--tx-priority-hex`)
 - `RUST_LOG` — e.g. `info,magma_sidecar=debug`
 

@@ -10,6 +10,8 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::policy::Network;
+
 /// Parse hex `U256` for `--tx-priority` (with or without `0x`).
 pub fn parse_u256_hex(s: &str) -> Result<U256, String> {
     let s = s.trim();
@@ -48,17 +50,17 @@ pub struct Config {
     #[arg(long, env = "MAGMA_TXPOOL_SOCKET")]
     pub txpool_socket: Option<PathBuf>,
 
-    /// Fallback hex priority used when no policy file is configured, or for txs the
+    /// Fallback hex priority used when no `--network` is configured, or for txs the
     /// policy elects not to recompute (matches node `DEFAULT_TX_PRIORITY`).
     #[arg(long, env = "MAGMA_TX_PRIORITY", default_value = "0xffff")]
     pub tx_priority_hex: String,
 
-    /// Optional path to a TOML policy file describing tip scoring (gateway addresses,
-    /// weights, base-fee floor). When present, the sidecar uses it to compute per-tx
-    /// priority; otherwise every Insert is stamped with `--tx-priority` (legacy mode).
-    /// Schema: see `docs/ARCHITECTURE.md` §"Priority policy" and `src/policy.rs`.
-    #[arg(long, env = "MAGMA_POLICY_CONFIG")]
-    pub policy_config: Option<PathBuf>,
+    /// Which network's `MagmaSearcherGateway` to score against. Omitting this
+    /// disables gateway-aware scoring entirely — every Insert is stamped with
+    /// `--tx-priority-hex` (legacy mode, single-tenant local dev only). The
+    /// per-network gateway addresses live in `src/policy.rs`.
+    #[arg(long, env = "MAGMA_NETWORK", value_enum)]
+    pub network: Option<Network>,
 }
 
 impl Config {

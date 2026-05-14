@@ -37,12 +37,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         format!("invalid --tx-priority / MAGMA_TX_PRIORITY ({e}); use hex, e.g. 0xffff or ffff")
     })?;
 
-    let priority_mode = match config.policy_config.as_ref() {
-        Some(path) => {
-            let policy = PolicyConfig::load(path)?;
+    let priority_mode = match config.network {
+        Some(network) => {
+            let policy = PolicyConfig::for_network(network);
             tracing::info!(
-                path = %path.display(),
-                gateways = policy.gateway_count(),
+                network = network.as_str(),
+                gateway = %policy.gateway(),
+                base_fee_floor_wei = policy.base_fee_floor_wei(),
                 "loaded tip policy"
             );
             PriorityMode::Policy {
@@ -53,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         None => {
             tracing::info!(
                 priority = %fallback_priority,
-                "no policy file; using constant priority for every Insert"
+                "no --network selected; stamping every Insert with the constant priority"
             );
             PriorityMode::Constant(fallback_priority)
         }

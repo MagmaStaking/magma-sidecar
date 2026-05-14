@@ -120,7 +120,6 @@ mod tests {
 
     use axum::body::to_bytes;
     use axum::http::Request;
-    use std::path::PathBuf;
     use tower::ServiceExt;
 
     use crate::metrics::Metrics;
@@ -133,7 +132,7 @@ mod tests {
             max_body_bytes: 1 << 20,
             txpool_socket: None,
             tx_priority_hex: "0xffff".into(),
-            policy_config: Option::<PathBuf>::None,
+            network: None,
         };
         HttpState::try_new(config, Metrics::new()).expect("state")
     }

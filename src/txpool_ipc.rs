@@ -237,15 +237,15 @@ mod tests {
         // selector is `nonpayable`, and the policy deliberately does not
         // credit `tx.value` as a bid (see `policy` module docs).
         let gw = address!("00000000000000000000000000000000000000bb");
-        let policy = PolicyConfig::from_parts(0, &[(gw, 1)]);
+        let policy = PolicyConfig::for_test(gw, 0);
         let mode = PriorityMode::Policy {
             policy: Arc::new(policy),
             fallback: U256::from(0xffffu64),
         };
         let tx = gateway_call_envelope(gw, U256::from(1_000_000u64));
         // fee:  5 * 21_000 = 105_000
-        // bid:  1_000_000        (weight 1)
-        // total:                 1_105_000
+        // bid:  1_000_000
+        // total:            1_105_000
         assert_eq!(mode.decide_priority(&tx), Some(U256::from(1_105_000u64)));
     }
 
@@ -256,7 +256,7 @@ mod tests {
         // on so it doesn't override the node's ordering for non-MEV traffic.
         let gw = address!("00000000000000000000000000000000000000bb");
         let other = address!("00000000000000000000000000000000000000cc");
-        let policy = PolicyConfig::from_parts(0, &[(gw, 1)]);
+        let policy = PolicyConfig::for_test(gw, 0);
         let mode = PriorityMode::Policy {
             policy: Arc::new(policy),
             fallback: U256::from(0xffffu64),
@@ -285,7 +285,7 @@ mod tests {
             b256!("00000000000000000000000000000000000000000000000000000000000000cc"),
         ));
         let gw = address!("00000000000000000000000000000000000000bb");
-        let policy = PolicyConfig::from_parts(0, &[(gw, 1)]);
+        let policy = PolicyConfig::for_test(gw, 0);
         let mode = PriorityMode::Policy {
             policy: Arc::new(policy),
             fallback: U256::from(0xffffu64),
@@ -316,7 +316,7 @@ mod tests {
             b256!("00000000000000000000000000000000000000000000000000000000000000bb"),
         ));
         let mode = PriorityMode::Policy {
-            policy: Arc::new(PolicyConfig::from_parts(0, &[(gw, 1)])),
+            policy: Arc::new(PolicyConfig::for_test(gw, 0)),
             fallback: U256::from(0x42u64),
         };
         assert_eq!(

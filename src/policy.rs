@@ -11,12 +11,11 @@
 //! - `gas_used` is approximated by `gas_limit` (a tight upper bound used by every
 //!   pre-execution scorer).
 //! - `effective_priority_fee` is approximated by `priority_fee_or_price()` clamped
-//!   against an optional `base_fee_floor` from the policy file. With the default
-//!   `base_fee_floor = 0` this is `max_priority_fee_per_gas` for EIP-1559 and
-//!   `gas_price` for legacy/EIP-2930 — the latter is a generous upper bound, but
-//!   that matches the design's "naive, tip-based MEV" framing.
+//!   against the network's `base_fee_floor_wei` constant. With Monad's current
+//!   0-wei base fee this clamp is a no-op; the constant exists so we can raise
+//!   the floor per-network without code churn if base fee ever climbs above 0.
 //! - `bid_routed_to_MagmaSearcherGateway` is the statically detectable bid into
-//!   an allowlisted gateway in the same tx. We only count it when `to ==
+//!   the network's single allowlisted gateway. We only count it when `to ==
 //!   gateway` AND calldata is `magmaSearcherGatewayCall(address, uint256
 //!   bidAmount, address, bytes)` — we then decode `bidAmount` from calldata.
 //!   This is the on-chain enforced minimum net ETH gain on the gateway (see
@@ -24,25 +23,27 @@
 //!   rank by, since `magmaSearcherGatewayCall` is `nonpayable` and so
 //!   `tx.value` is always 0 on this path.
 //!
-//!   Anything else to a gateway address — empty calldata, a non-matching
+//!   Anything else to the gateway address — empty calldata, a non-matching
 //!   selector, a direct `receive()` top-up — gets a bid component of zero. We
 //!   deliberately do *not* fall back to `tx.value`: a `receive()` top-up is an
 //!   operational deposit, not a searcher bid declared as a minimum net gain,
 //!   so ranking it as one would conflate two different intents and let anyone
 //!   buy priority by sending native value to the gateway.
 //!
-//!   Per-gateway multipliers in the policy file let us weight trusted gateways
-//!   without changing code; richer attribution (event-based, sub-call value
-//!   flows that bypass the direct `to == gateway` invariant) remains the
-//!   follow-up tightening called out in the doc.
-
-use std::collections::HashMap;
-use std::path::Path;
+//! ## Network selection
+//!
+//! There is exactly one `MagmaSearcherGateway` per network (mainnet, testnet,
+//! localnet). The address is baked into this file rather than loaded from a
+//! config file at runtime, so a gateway redeploy ships as a versioned binary
+//! (and a new `.deb`) rather than an out-of-band ops change. Pick the network
+//! at startup with `--network` (or `MAGMA_NETWORK`); if you don't, the sidecar
+//! falls back to stamping every Insert with the constant `--tx-priority-hex`
+//! and ignores gateway scoring entirely.
 
 use alloy_consensus::{Transaction, TxEnvelope};
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{address, Address, U256};
 use alloy_sol_types::{sol, SolCall};
-use serde::Deserialize;
+use clap::ValueEnum;
 
 sol! {
     /// ABI for `MagmaSearcherGateway.magmaSearcherGatewayCall`. We only use the
@@ -58,119 +59,101 @@ sol! {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum PolicyError {
-    #[error("read policy file {path}: {source}")]
-    Read {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("parse policy file {path}: {source}")]
-    Parse {
-        path: String,
-        #[source]
-        source: toml::de::Error,
-    },
-    #[error("invalid policy: {0}")]
-    Invalid(String),
+/// Networks the sidecar knows how to score for. Selected via `--network` /
+/// `MAGMA_NETWORK`. Adding a network is a 3-line change: variant + gateway()
+/// + base_fee_floor_wei() arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum Network {
+    /// Magma mainnet.
+    Mainnet,
+    /// Magma testnet.
+    Testnet,
+    /// Local Monad devnet — gateway address comes from
+    /// `mev-entrypoint/test-scripts/script/DeployCounterSearchers.s.sol`,
+    /// deterministic for anvil account #0 at nonce 0.
+    Localnet,
 }
 
-/// Raw on-disk shape (TOML).
-///
-/// `base_fee_floor_wei` is a `u64` because TOML's integer type maxes at i64;
-/// `u64::MAX` wei is ~1.8e19 (≈18.4 ETH per gas), well above any realistic floor.
-#[derive(Debug, Deserialize)]
-struct PolicyFile {
-    #[serde(default)]
-    base_fee_floor_wei: Option<u64>,
-    #[serde(default)]
-    gateway: Vec<GatewayEntry>,
+impl Network {
+    /// The single allowlisted `MagmaSearcherGateway` for this network.
+    pub const fn gateway(self) -> Address {
+        match self {
+            // TODO(magma): replace with the real mainnet gateway address once deployed.
+            Self::Mainnet => address!("0000000000000000000000000000000000000000"),
+            // TODO(magma): replace with the real testnet gateway address once deployed.
+            Self::Testnet => address!("0000000000000000000000000000000000000000"),
+            // Deterministic deployment from `make deploy` in mev-entrypoint/test-scripts/.
+            Self::Localnet => address!("8f86403a4de0bb5791fa46b8e795c547942fe4cf"),
+        }
+    }
+
+    /// Per-network floor for the priority-fee component of legacy / EIP-2930 txs,
+    /// in wei. `priority_fee_or_price()` returns `gas_price` for those tx types,
+    /// which overstates the proposer-visible tip once base fee > 0; we clamp it
+    /// to `max_fee - base_fee_floor_wei` so the scorer doesn't over-credit them.
+    ///
+    /// Monad currently runs with base fee == 0 on every network, so all three
+    /// constants are 0 today. The per-network split is here so we can raise the
+    /// floor in lockstep with a network parameter change without a code
+    /// restructure.
+    pub const fn base_fee_floor_wei(self) -> u128 {
+        match self {
+            Self::Mainnet | Self::Testnet | Self::Localnet => 0,
+        }
+    }
+
+    /// Short label used in log lines and structured health output.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mainnet => "mainnet",
+            Self::Testnet => "testnet",
+            Self::Localnet => "localnet",
+        }
+    }
 }
 
-#[derive(Debug, Deserialize)]
-struct GatewayEntry {
-    address: Address,
-    /// Optional integer weight applied to value routed into this gateway.
-    /// `None` means weight = 1. Use e.g. 2 to double-count routing into a
-    /// preferred gateway, or 0 to ignore an allowlisted gateway entirely.
-    #[serde(default)]
-    weight: Option<u64>,
-    /// Optional human label, ignored by the scorer (kept for ops).
-    #[serde(default)]
-    #[allow(dead_code)]
-    label: Option<String>,
-}
-
-/// Parsed, validated tip policy.
-#[derive(Debug, Clone, Default)]
+/// Compiled policy: the (gateway, base_fee_floor) pair the scorer closes over.
+/// Construct via `PolicyConfig::for_network` in production; the `for_test`
+/// helper exists so unit tests can pin an arbitrary gateway address without
+/// depending on which `Network` it's keyed under.
+#[derive(Debug, Clone, Copy)]
 pub struct PolicyConfig {
+    gateway: Address,
     base_fee_floor_wei: u128,
-    gateway_weights: HashMap<Address, u64>,
 }
 
 impl PolicyConfig {
-    /// Load a policy from a TOML file. Example:
-    ///
-    /// ```toml
-    /// base_fee_floor_wei = 0
-    ///
-    /// [[gateway]]
-    /// address = "0x0000000000000000000000000000000000000000"
-    /// weight = 1
-    /// label  = "MagmaSearcherGateway (mainnet)"
-    /// ```
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, PolicyError> {
-        let path_ref = path.as_ref();
-        let path_display = path_ref.display().to_string();
-        let raw = std::fs::read_to_string(path_ref).map_err(|source| PolicyError::Read {
-            path: path_display.clone(),
-            source,
-        })?;
-        let file: PolicyFile = toml::from_str(&raw).map_err(|source| PolicyError::Parse {
-            path: path_display,
-            source,
-        })?;
-
-        let mut gateway_weights = HashMap::with_capacity(file.gateway.len());
-        for g in file.gateway {
-            let weight = g.weight.unwrap_or(1);
-            if gateway_weights.insert(g.address, weight).is_some() {
-                return Err(PolicyError::Invalid(format!(
-                    "duplicate gateway address {}",
-                    g.address
-                )));
-            }
-        }
-
-        Ok(Self {
-            base_fee_floor_wei: file.base_fee_floor_wei.unwrap_or(0) as u128,
-            gateway_weights,
-        })
-    }
-
-    /// Number of allowlisted gateways. Useful for log lines and `/health`.
-    pub fn gateway_count(&self) -> usize {
-        self.gateway_weights.len()
-    }
-
-    /// True when `addr` is an allowlisted `MagmaSearcherGateway`.
-    ///
-    /// Gateways with `weight = 0` are still considered allowlisted by this
-    /// predicate (they were declared in the policy, just deliberately
-    /// neutralized in the score). This keeps "is this a gateway tx?" decoupled
-    /// from "what score does it get?".
-    pub fn is_allowlisted_gateway(&self, addr: &Address) -> bool {
-        self.gateway_weights.contains_key(addr)
-    }
-
-    /// Build a policy in-memory. Used by tests in other modules; production
-    /// code paths go through [`PolicyConfig::load`].
-    #[cfg(test)]
-    pub fn from_parts(base_fee_floor_wei: u128, gateways: &[(Address, u64)]) -> Self {
+    pub fn for_network(network: Network) -> Self {
         Self {
+            gateway: network.gateway(),
+            base_fee_floor_wei: network.base_fee_floor_wei(),
+        }
+    }
+
+    /// The single allowlisted gateway address for this policy.
+    pub fn gateway(&self) -> Address {
+        self.gateway
+    }
+
+    /// True when `addr` is the network's allowlisted `MagmaSearcherGateway`.
+    pub fn is_allowlisted_gateway(&self, addr: &Address) -> bool {
+        *addr == self.gateway
+    }
+
+    /// Per-network base-fee floor applied to `priority_fee_or_price()` clamps.
+    pub fn base_fee_floor_wei(&self) -> u128 {
+        self.base_fee_floor_wei
+    }
+
+    /// Test-only constructor: pin an arbitrary gateway + floor without going
+    /// through the `Network` enum. Lets tests reuse `compute_priority` against
+    /// synthetic addresses that won't collide with real deployments.
+    #[cfg(test)]
+    pub(crate) fn for_test(gateway: Address, base_fee_floor_wei: u128) -> Self {
+        Self {
+            gateway,
             base_fee_floor_wei,
-            gateway_weights: gateways.iter().copied().collect(),
         }
     }
 }
@@ -184,17 +167,11 @@ pub fn compute_priority(tx: &TxEnvelope, policy: &PolicyConfig) -> U256 {
     let fee_component = U256::from(priority_fee).saturating_mul(U256::from(gas_limit));
 
     let bid_component = match tx.to() {
-        Some(to) => match policy.gateway_weights.get(&to).copied() {
-            Some(weight) => match gateway_bid_amount(tx) {
-                Some(raw) => raw.saturating_mul(U256::from(weight)),
-                // Only the explicit `magmaSearcherGatewayCall` path counts as a bid.
-                // Plain `receive()` top-ups (or any other calldata to the gateway) are
-                // operational deposits, not searcher bids — see module docs.
-                None => U256::ZERO,
-            },
-            None => U256::ZERO,
-        },
-        None => U256::ZERO,
+        Some(to) if to == policy.gateway => gateway_bid_amount(tx).unwrap_or(U256::ZERO),
+        // Only the explicit `magmaSearcherGatewayCall` path counts as a bid.
+        // Plain `receive()` top-ups (or any other calldata to the gateway) are
+        // operational deposits, not searcher bids — see module docs.
+        _ => U256::ZERO,
     };
 
     fee_component.saturating_add(bid_component)
@@ -225,7 +202,7 @@ fn gateway_bid_amount(tx: &TxEnvelope) -> Option<U256> {
 /// the ABI encoder.
 #[cfg(test)]
 pub(crate) fn gateway_call_calldata(bid_amount: U256) -> alloy_primitives::Bytes {
-    use alloy_primitives::{address, Bytes};
+    use alloy_primitives::Bytes;
     IMagmaSearcherGateway::magmaSearcherGatewayCallCall {
         sender: address!("00000000000000000000000000000000000000ee"),
         bidAmount: bid_amount,
@@ -275,14 +252,9 @@ mod tests {
         ))
     }
 
-    fn policy_with_gateway(addr: Address, weight: u64) -> PolicyConfig {
-        let mut gateway_weights = HashMap::new();
-        gateway_weights.insert(addr, weight);
-        PolicyConfig {
-            base_fee_floor_wei: 0,
-            gateway_weights,
-        }
-    }
+    /// Sentinel gateway address used by tests that want a policy whose gateway
+    /// definitely doesn't match the tx's `to` (so the bid component is zero).
+    const UNRELATED_GATEWAY: Address = address!("00000000000000000000000000000000000000ff");
 
     #[test]
     fn eip1559_priority_fee_only() {
@@ -297,8 +269,9 @@ mod tests {
             access_list: Default::default(),
             input: Default::default(),
         });
-        let policy = PolicyConfig::default();
-        // 5 * 21_000 = 105_000; no gateway match so value_component = 0.
+        // Policy keyed to an unrelated gateway: no gateway match → bid component zero.
+        let policy = PolicyConfig::for_test(UNRELATED_GATEWAY, 0);
+        // 5 * 21_000 = 105_000
         assert_eq!(compute_priority(&tx, &policy), U256::from(105_000u64));
     }
 
@@ -319,7 +292,7 @@ mod tests {
             access_list: Default::default(),
             input: Default::default(),
         });
-        let policy = policy_with_gateway(gw, 1);
+        let policy = PolicyConfig::for_test(gw, 0);
         // 5 * 21_000 + 0 = 105_000
         assert_eq!(compute_priority(&tx, &policy), U256::from(105_000u64));
     }
@@ -339,28 +312,9 @@ mod tests {
             access_list: Default::default(),
             input: gateway_call_calldata(U256::from(7_000_000u64)),
         });
-        let policy = policy_with_gateway(gw, 1);
+        let policy = PolicyConfig::for_test(gw, 0);
         // 5 * 21_000 + 7_000_000 = 7_105_000
         assert_eq!(compute_priority(&tx, &policy), U256::from(7_105_000u64));
-    }
-
-    #[test]
-    fn gateway_call_weight_scales_bid_amount() {
-        let gw = address!("00000000000000000000000000000000000000bb");
-        let tx = signed_eip1559(TxEip1559 {
-            chain_id: 1,
-            nonce: 0,
-            gas_limit: 21_000,
-            max_fee_per_gas: 100,
-            max_priority_fee_per_gas: 5,
-            to: TxKind::Call(gw),
-            value: U256::ZERO,
-            access_list: Default::default(),
-            input: gateway_call_calldata(U256::from(1_000u64)),
-        });
-        let policy = policy_with_gateway(gw, 3);
-        // 5 * 21_000 + 3 * 1_000 = 108_000
-        assert_eq!(compute_priority(&tx, &policy), U256::from(108_000u64));
     }
 
     #[test]
@@ -382,48 +336,8 @@ mod tests {
             access_list: Default::default(),
             input: Bytes::from(bogus),
         });
-        let policy = policy_with_gateway(gw, 1);
+        let policy = PolicyConfig::for_test(gw, 0);
         // 5 * 21_000 + 0 = 105_000
-        assert_eq!(compute_priority(&tx, &policy), U256::from(105_000u64));
-    }
-
-    #[test]
-    fn gateway_weight_does_not_apply_to_receive_topup() {
-        // Weight only multiplies a *decoded* `bidAmount`. A `receive()` top-up has no
-        // bid to multiply, so the weight is irrelevant — score is just the priority fee.
-        let gw = address!("00000000000000000000000000000000000000bb");
-        let tx = signed_eip1559(TxEip1559 {
-            chain_id: 1,
-            nonce: 0,
-            gas_limit: 21_000,
-            max_fee_per_gas: 100,
-            max_priority_fee_per_gas: 5,
-            to: TxKind::Call(gw),
-            value: U256::from(1_000u64),
-            access_list: Default::default(),
-            input: Default::default(),
-        });
-        let policy = policy_with_gateway(gw, 3);
-        // 5 * 21_000 + 0 = 105_000   (weight has no bid to multiply)
-        assert_eq!(compute_priority(&tx, &policy), U256::from(105_000u64));
-    }
-
-    #[test]
-    fn weight_zero_zeroes_decoded_bid() {
-        // Decoded `bidAmount = 1_000`, weight = 0 → bid component is zeroed regardless.
-        let gw = address!("00000000000000000000000000000000000000bb");
-        let tx = signed_eip1559(TxEip1559 {
-            chain_id: 1,
-            nonce: 0,
-            gas_limit: 21_000,
-            max_fee_per_gas: 100,
-            max_priority_fee_per_gas: 5,
-            to: TxKind::Call(gw),
-            value: U256::ZERO,
-            access_list: Default::default(),
-            input: gateway_call_calldata(U256::from(1_000u64)),
-        });
-        let policy = policy_with_gateway(gw, 0);
         assert_eq!(compute_priority(&tx, &policy), U256::from(105_000u64));
     }
 
@@ -442,7 +356,7 @@ mod tests {
             access_list: Default::default(),
             input: Default::default(),
         });
-        let policy = policy_with_gateway(gw, 1);
+        let policy = PolicyConfig::for_test(gw, 0);
         assert_eq!(compute_priority(&tx, &policy), U256::from(105_000u64));
     }
 
@@ -457,10 +371,7 @@ mod tests {
             value: U256::ZERO,
             input: Default::default(),
         });
-        let policy = PolicyConfig {
-            base_fee_floor_wei: 10,
-            gateway_weights: HashMap::new(),
-        };
+        let policy = PolicyConfig::for_test(UNRELATED_GATEWAY, 10);
         // (50 - 10) * 21_000 = 840_000
         assert_eq!(compute_priority(&tx, &policy), U256::from(840_000u64));
     }
@@ -479,73 +390,22 @@ mod tests {
             input: Default::default(),
         });
         let gw = address!("00000000000000000000000000000000000000bb");
-        let policy = policy_with_gateway(gw, 1);
+        let policy = PolicyConfig::for_test(gw, 0);
         assert_eq!(compute_priority(&tx, &policy), U256::from(7 * 21_000u64));
     }
 
     #[test]
-    fn loads_toml_with_gateway_table() {
-        let dir = tempdir();
-        let path = dir.join("policy.toml");
-        std::fs::write(
-            &path,
-            r#"
-base_fee_floor_wei = 25
+    fn network_constants_are_well_formed() {
+        // Sanity: localnet is the only network with a real address today.
+        assert_ne!(Network::Localnet.gateway(), Address::ZERO);
+        assert_eq!(Network::Mainnet.base_fee_floor_wei(), 0);
+        assert_eq!(Network::Testnet.base_fee_floor_wei(), 0);
+        assert_eq!(Network::Localnet.base_fee_floor_wei(), 0);
 
-[[gateway]]
-address = "0x00000000000000000000000000000000000000aa"
-weight = 2
-label  = "primary"
-
-[[gateway]]
-address = "0x00000000000000000000000000000000000000bb"
-"#,
-        )
-        .unwrap();
-        let p = PolicyConfig::load(&path).expect("policy loads");
-        assert_eq!(p.base_fee_floor_wei, 25);
-        assert_eq!(p.gateway_count(), 2);
-        assert_eq!(
-            p.gateway_weights[&address!("00000000000000000000000000000000000000aa")],
-            2
-        );
-        assert_eq!(
-            p.gateway_weights[&address!("00000000000000000000000000000000000000bb")],
-            1
-        );
-    }
-
-    #[test]
-    fn rejects_duplicate_gateway() {
-        let dir = tempdir();
-        let path = dir.join("dup.toml");
-        std::fs::write(
-            &path,
-            r#"
-[[gateway]]
-address = "0x00000000000000000000000000000000000000aa"
-[[gateway]]
-address = "0x00000000000000000000000000000000000000aa"
-"#,
-        )
-        .unwrap();
-        let err = PolicyConfig::load(&path).expect_err("should reject duplicate");
-        assert!(matches!(err, PolicyError::Invalid(_)), "{err:?}");
-    }
-
-    /// Tiny tempdir helper so we don't pull in the `tempfile` crate just for two tests.
-    fn tempdir() -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        let name = format!(
-            "magma-sidecar-policy-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        p.push(name);
-        std::fs::create_dir_all(&p).unwrap();
-        p
+        // for_network round-trips.
+        let p = PolicyConfig::for_network(Network::Localnet);
+        assert_eq!(p.gateway(), Network::Localnet.gateway());
+        assert!(p.is_allowlisted_gateway(&Network::Localnet.gateway()));
+        assert!(!p.is_allowlisted_gateway(&Address::ZERO));
     }
 }

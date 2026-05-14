@@ -1,0 +1,35 @@
+[Unit]
+Description=Magma Sidecar - tip-based MEV reprioritization for Monad
+Documentation=https://github.com/hydrogen-labs/magma-sidecar
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=monad
+Group=monad
+# All knobs live here. Every flag in src/config.rs has a 1:1 MAGMA_* env var,
+# so ExecStart stays argument-less and operators edit only this file.
+EnvironmentFile=/etc/magma-sidecar/sidecar.env
+ExecStart=/usr/bin/magma-sidecar
+Restart=always
+RestartSec=2
+
+# Security hardening. ReadOnlyPaths keeps the service from rewriting its own
+# config; the txpool socket lives under /home/monad/... which `monad` owns,
+# so no extra ReadWritePaths needed (ProtectHome=read-only still lets us
+# connect() to AF_UNIX sockets in the home dir).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+ReadOnlyPaths=/etc/magma-sidecar
+
+[Install]
+WantedBy=multi-user.target

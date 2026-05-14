@@ -69,20 +69,21 @@ The sidecar's priority is a **tip-based score**, applied **only to transactions 
 
 ```
 tip(tx) = effective_priority_fee(tx) * gas_used(tx)
-       + bid_routed_to_MagmaSearcherGateway(tx) * gateway_weight
+       + bid_routed_to_MagmaSearcherGateway(tx)
 ```
 
 - `effective_priority_fee` is the EIP-1559 priority fee component the validator would receive.
 - `bid_routed_to_MagmaSearcherGateway` is read statically from the signed tx (already known to satisfy `to == gateway` thanks to the allowlist filter):
   - if calldata is a `magmaSearcherGatewayCall(address sender, uint256 bidAmount, address searcherContract, bytes searcherCallData)`, the sidecar decodes `bidAmount` from calldata. This is the on-chain enforced minimum net ETH gain on the gateway contract, so it is the right number to rank by — and `magmaSearcherGatewayCall` is `nonpayable`, so `tx.value` is always 0 on this path.
   - any other call to the gateway (empty calldata, a non-matching selector, a direct `receive()` top-up) gets a bid component of **zero**. We deliberately do not fall back to `tx.value`: a `receive()` deposit is an operational top-up rather than a searcher bid declared as a minimum net gain, and crediting it would let anyone buy priority by sending native value to the gateway.
-- `gateway_weight` is a per-gateway multiplier (default 1) declared in the policy file; setting it to 0 keeps the gateway on the allowlist (so its txs are still scored and reinjected) but zeros out the bid component, leaving only the priority-fee contribution.
+
+Each network has exactly one allowlisted `MagmaSearcherGateway`, baked into [`src/policy.rs`](../src/policy.rs) and selected at startup with `--network` (one of `mainnet`, `testnet`, `localnet`). A gateway redeploy ships as a versioned binary rather than an out-of-band config change.
 
 The score is mapped into the IPC priority field (a `U256`-shaped slot in `EthTxPoolIpcTx`); ordering is per-tx by tip. The plumbing is policy-agnostic, so richer policies (e.g. backrun pairing, sub-call attribution) can replace the scoring function in place.
 
-Non-gateway traffic (`to` not on the allowlist, including `CREATE`) is **not reinjected**: the node's default txpool ordering decides where it lands. This keeps magma-sidecar narrowly scoped to MEV traffic and lets it coexist on the same `mempool.sock` with peer reprioritizers that target different ecosystems.
+Non-gateway traffic (`to` not the allowlisted gateway, including `CREATE`) is **not reinjected**: the node's default txpool ordering decides where it lands. This keeps magma-sidecar narrowly scoped to MEV traffic and lets it coexist on the same `mempool.sock` with peer reprioritizers that target different ecosystems.
 
-The `--tx-priority` constant serves as a fallback for gateway-bound txs whose computed score is exactly zero (e.g. zero priority fee, zero bid), and as the legacy "stamp every Insert" priority when the sidecar is run without `--policy-config` at all.
+The `--tx-priority` constant serves as a fallback for gateway-bound txs whose computed score is exactly zero (e.g. zero priority fee, zero bid), and as the legacy "stamp every Insert" priority when the sidecar is run without `--network` at all.
 
 ### Monad node (`monad-bft`)
 

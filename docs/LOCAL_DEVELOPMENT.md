@@ -137,15 +137,13 @@ This wires up:
 - `MAGMA_SIDECAR_BIND=0.0.0.0:8089`
 - `MAGMA_MONAD_RPC_URL=http://127.0.0.1:8080`
 - `MAGMA_TXPOOL_SOCKET=/tmp/monad-mempool.sock` — the short symlink from §1a
-- `MAGMA_POLICY_CONFIG=./policy.local.toml` — gateway allowlist for the tip scorer
+- `MAGMA_NETWORK=localnet` — selects the local-devnet gateway address baked into `src/policy.rs`
 - `MAGMA_TX_PRIORITY=0xffff` — fallback priority
 - `RUST_LOG=info,magma_sidecar=debug` — surfaces the per-tx "reinjecting" / "skipping" lines
 
 A successful attach logs `connected to Monad txpool IPC path=/tmp/monad-mempool.sock`. If you see `txpool IPC connect failed; retrying`, revisit §1a — the socket either isn't writable by your user or the path you passed is over 107 bytes.
 
-> **Why a `.env.local` and not a richer `policy.toml`?** Connection wiring (socket path, RPC URL, bind addr) is per-deployment and changes every `nets/run.sh`; it belongs in env. Policy (gateway allowlist, weights, base-fee floor) is protocol-stable and belongs in `policy.toml`. Keeping them separate means the same `policy.toml` can ship across docker-dev, CI, and production unchanged.
-
-To exercise the tip-scoring policy locally, point `MAGMA_POLICY_CONFIG` at a TOML file listing the deployed `MagmaSearcherGateway` address (see the README for schema). Without it, every `Insert` is stamped with the constant `MAGMA_TX_PRIORITY` and the gateway-only filter is bypassed.
+To exercise the tip-scoring policy locally, set `MAGMA_NETWORK=localnet`; the gateway address is the one written by `make deploy` in `mev-entrypoint/test-scripts/` (deterministic for anvil account #0 at nonce 0). Without `MAGMA_NETWORK`, every `Insert` is stamped with the constant `MAGMA_TX_PRIORITY` and the gateway-only filter is bypassed — useful for ingress-only smoke tests, not for scoring.
 
 #### Override on the command line when you want to
 
