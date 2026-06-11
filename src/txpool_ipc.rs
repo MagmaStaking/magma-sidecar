@@ -198,8 +198,9 @@ mod tests {
     }
 
     /// EIP-1559 tx to `gw` carrying a real `magmaSearcherGatewayCall(...)` with the
-    /// requested `bid_amount`. `value` is zero — the on-chain selector is
-    /// `nonpayable` so this is what production traffic actually looks like.
+    /// requested `bid_amount`. `value` is zero — the call is `payable`, but any value
+    /// is forwarded to the searcher rather than ranked as a bid, so production bid
+    /// traffic carries the commitment in `bidAmount`, not `tx.value`.
     fn gateway_call_envelope(gw: alloy_primitives::Address, bid_amount: U256) -> TxEnvelope {
         let sig = Signature::new(U256::from(1u64), U256::from(1u64), false);
         TxEnvelope::Eip1559(Signed::new_unchecked(
@@ -233,9 +234,9 @@ mod tests {
     fn policy_mode_uses_computed_score_for_gateway_tx() {
         // Real gateway call (decoded `bidAmount = 1_000_000`) routed to an
         // allowlisted gateway: priority should be the fee component plus the
-        // decoded bid, not the fallback. `tx.value` is zero — the on-chain
-        // selector is `nonpayable`, and the policy deliberately does not
-        // credit `tx.value` as a bid (see `policy` module docs).
+        // decoded bid, not the fallback. `tx.value` is zero — the call is
+        // `payable` but the policy deliberately does not credit `tx.value` as a
+        // bid (it is forwarded to the searcher; see `policy` module docs).
         let gw = address!("00000000000000000000000000000000000000bb");
         let policy = PolicyConfig::for_test(gw, 0);
         let mode = PriorityMode::Policy {

@@ -17,11 +17,20 @@
 //! - `bid_routed_to_MagmaSearcherGateway` is the statically detectable bid into
 //!   the network's single allowlisted gateway. We only count it when `to ==
 //!   gateway` AND calldata is `magmaSearcherGatewayCall(address, uint256
-//!   bidAmount, address, bytes)` — we then decode `bidAmount` from calldata.
-//!   This is the on-chain enforced minimum net ETH gain on the gateway (see
-//!   `mev-entrypoint/src/MagmaSearcherGateway.sol`) and is the right number to
-//!   rank by, since `magmaSearcherGatewayCall` is `nonpayable` and so
-//!   `tx.value` is always 0 on this path.
+//!   bidAmount, uint64, bytes32, bool, address, bytes)` — we then decode
+//!   `bidAmount` from calldata. This is the on-chain enforced minimum net ETH
+//!   gain on the gateway; on success it is split into a fixed protocol fee plus a
+//!   validator reward routed to the block proposer (resolved via the Monad
+//!   staking precompile's `getProposerValId()` and keyed by `validatorId`,
+//!   accrued until a recipient is set — see
+//!   `mev-entrypoint/src/MagmaSearcherGateway.sol`). The validator reward is a
+//!   fixed fraction of `bidAmount`, so `bidAmount` preserves the correct ranking
+//!   order and is the right number to rank by.
+//!
+//!   `magmaSearcherGatewayCall` is now `payable`, but any `tx.value` is forwarded
+//!   to the searcher (working capital for the MEV op), not paid to the validator.
+//!   We therefore still rank purely by the decoded `bidAmount` and deliberately do
+//!   *not* add `tx.value` to the bid component.
 //!
 //!   Anything else to the gateway address — empty calldata, a non-matching
 //!   selector, a direct `receive()` top-up — gets a bid component of zero. We
@@ -53,9 +62,12 @@ sol! {
         function magmaSearcherGatewayCall(
             address sender,
             uint256 bidAmount,
+            uint64 targetBlockNumber,
+            bytes32 targetTxHash,
+            bool requireExclusiveSlot,
             address searcherContract,
             bytes searcherCallData
-        ) external;
+        ) external payable;
     }
 }
 
@@ -195,17 +207,21 @@ fn gateway_bid_amount(tx: &TxEnvelope) -> Option<U256> {
     Some(call.bidAmount)
 }
 
-/// Build calldata for `magmaSearcherGatewayCall(sender, bidAmount, searcher, data)`.
+/// Build calldata for `magmaSearcherGatewayCall(sender, bidAmount, targetBlockNumber,
+/// targetTxHash, requireExclusiveSlot, searcher, data)`.
 ///
 /// Test-only helper, shared across modules so tests for the txpool IPC layer can
 /// exercise the same bid-decoding path as the policy tests without duplicating
 /// the ABI encoder.
 #[cfg(test)]
 pub(crate) fn gateway_call_calldata(bid_amount: U256) -> alloy_primitives::Bytes {
-    use alloy_primitives::Bytes;
+    use alloy_primitives::{Bytes, B256};
     IMagmaSearcherGateway::magmaSearcherGatewayCallCall {
         sender: address!("00000000000000000000000000000000000000ee"),
         bidAmount: bid_amount,
+        targetBlockNumber: 0,
+        targetTxHash: B256::ZERO,
+        requireExclusiveSlot: false,
         searcherContract: address!("00000000000000000000000000000000000000ff"),
         searcherCallData: Bytes::from_static(b"opaque"),
     }
@@ -307,7 +323,8 @@ mod tests {
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 5,
             to: TxKind::Call(gw),
-            // Non-payable on-chain, so always 0 in practice.
+            // Payable on-chain, but any value is forwarded to the searcher, not
+            // counted as a bid. Bid component comes purely from decoded `bidAmount`.
             value: U256::ZERO,
             access_list: Default::default(),
             input: gateway_call_calldata(U256::from(7_000_000u64)),
