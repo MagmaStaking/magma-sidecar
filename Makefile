@@ -41,6 +41,7 @@ LATEST_DEB     = $(shell ls -1t $(BUILD_DIR)/$(PACKAGE)_*_$(ARCH).deb 2>/dev/nul
 .PHONY: help build release test fmt fmt-check lint check \
         build-deb build-deb-amd64 build-deb-arm64 \
         docker-build docker-run \
+        link-socket \
         install uninstall purge \
         service-start service-stop service-restart service-status service-logs \
         clean distclean print-version
@@ -89,6 +90,11 @@ docker-run: ## Run the locally-built image in ingress-only mode against host RPC
 	docker run --rm -p 8089:8089 \
 	    -e MAGMA_MONAD_RPC_URL=http://host.docker.internal:8545 \
 	    $(DOCKER_IMAGE):$(DOCKER_TAG)
+
+# ----- Local dev (monad-bft single-node) ----------------------------------
+
+link-socket: ## Point /tmp/monad-mempool.sock at the current single-node run (needs sudo)
+	./scripts/link-txpool-socket.sh
 
 # ----- Local install / service helpers ------------------------------------
 

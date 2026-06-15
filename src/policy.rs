@@ -96,7 +96,7 @@ impl Network {
             // TODO(magma): replace with the real testnet gateway address once deployed.
             Self::Testnet => address!("0000000000000000000000000000000000000000"),
             // Deterministic deployment from `make deploy` in mev-entrypoint/test-scripts/.
-            Self::Localnet => address!("8f86403a4de0bb5791fa46b8e795c547942fe4cf"),
+            Self::Localnet => address!("0xe7f1725e7734ce288f8367e1bb143e90bb3f0512"),
         }
     }
 
