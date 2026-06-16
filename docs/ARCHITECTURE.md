@@ -79,11 +79,36 @@ tip(tx) = effective_priority_fee(tx) * gas_used(tx)
 
 Each network has exactly one allowlisted `MagmaSearcherGateway`, baked into [`src/policy.rs`](../src/policy.rs) and selected at startup with `--network` (one of `mainnet`, `testnet`, `localnet`). A gateway redeploy ships as a versioned binary rather than an out-of-band config change.
 
-The score is mapped into the IPC priority field (a `U256`-shaped slot in `EthTxPoolIpcTx`); ordering is per-tx by tip. The plumbing is policy-agnostic, so richer policies (e.g. backrun pairing, sub-call attribution) can replace the scoring function in place.
+The score is mapped into the IPC priority field (a `U256`-shaped slot in `EthTxPoolIpcTx`). Top-of-block bids are ordered by this tip scalar; backrun bids use the structured encoding described in **Backrun pairing** below so they land immediately behind their target rather than being ranked absolutely.
 
-Non-gateway traffic (`to` not the allowlisted gateway, including `CREATE`) is **not reinjected**: the node's default txpool ordering decides where it lands. This keeps magma-sidecar narrowly scoped to MEV traffic and lets it coexist on the same `mempool.sock` with peer reprioritizers that target different ecosystems.
+Non-gateway traffic (`to` not the allowlisted gateway, including `CREATE`) is **not reinjected on its own**: the node's default txpool ordering decides where it lands, *unless* a backrun bid references it as a target (see below). This keeps magma-sidecar narrowly scoped to MEV traffic and lets it coexist on the same `mempool.sock` with peer reprioritizers that target different ecosystems.
 
 The `--tx-priority` constant serves as a fallback for gateway-bound txs whose computed score is exactly zero (e.g. zero priority fee, zero bid), and as the legacy "stamp every Insert" priority when the sidecar is run without `--network` at all.
+
+### Backrun pairing
+
+A `magmaSearcherGatewayCall` carries a `targetTxHash`. When it is zero the bid is a **lead-block (top-of-block)** bid; when it is non-zero the bid wants to execute **immediately after** the referenced target transaction (a backrun). Ranking a backrun by a flat `fee + bid` scalar is wrong: a large bid sorts *ahead of* the very tx it depends on. Backruns need **relative placement**, not absolute ranking.
+
+The sidecar solves this by laying the 256-bit IPC priority out into fields so a target and its bids sort adjacently, with the target just above its bids:
+
+```
+TOB bid          : bit 255 = 1 | low 128 bits = fee + bid
+backrun target   : bit 255 = 0 | backrun_id (bits 254..129) | bit 128 = 1
+backrun bid      : bit 255 = 0 | backrun_id (bits 254..129) | bit 128 = 0 | low 128 = fee + bid
+```
+
+`backrun_id` is the top 126 bits of the target tx hash, computed identically by the target and every bid that references it. Consequences:
+
+- Any TOB bid (`>= 2^255`) outranks every backrun group (`< 2^255`).
+- Within a group the target (opportunity bit set) sits just above its bids.
+- Competing bids on the same target self-order by the **same `fee + bid` scalar TOB uses** — i.e. by total realized validator value (`priority_fee * gas_limit + bidAmount`) — directly behind the target. The bid seated behind the target is the one that pays the proposer the most, whether that value arrives via the gateway bid or via gas. (This is the validator-revenue-maximizing choice; if the protocol later wanted to force value through the taxed `bidAmount` channel, this is the line to change.)
+- Vanilla node-default priorities are small and sort below everything structured here.
+
+To pair a bid with its target the sidecar keeps a small, TTL-bounded state in [`src/backrun.rs`](../src/backrun.rs): a cache of recently-seen txs (candidate targets) and an index of bids parked awaiting their target. Matching is **arrival-order independent** — if the bid arrives first it is parked and flushed when the target appears; if the target is already cached the pair is streamed immediately. When a backrun is paired, the sidecar reinjects **both** the target (boosted to its opportunity slot) and the bid. The cache TTL and capacity are configurable via `--backrun-pool-ttl-ms` / `MAGMA_BACKRUN_POOL_TTL_MS` and `--backrun-pool-max` / `MAGMA_BACKRUN_POOL_MAX`.
+
+Pairing activity is surfaced on `/health` and `/metrics`: `backrun_pairs_matched_total`, `backrun_bids_pended_total`, `backrun_bids_expired_total`, and the `backrun_pending` / `backrun_cache` gauges.
+
+This differs from `fastlane-sidecar`, which only pairs when the target is already pooled at bid time, never re-scans, and does not actively manage competing bids.
 
 ### Monad node (`monad-bft`)
 

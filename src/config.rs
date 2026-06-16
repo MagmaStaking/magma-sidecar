@@ -61,6 +61,16 @@ pub struct Config {
     /// per-network gateway addresses live in `src/policy.rs`.
     #[arg(long, env = "MAGMA_NETWORK", value_enum)]
     pub network: Option<Network>,
+
+    /// How long (milliseconds) the backrun pairing pool holds a cached target tx
+    /// or a parked bid before expiring it. Only used in `--network` (policy) mode.
+    #[arg(long, env = "MAGMA_BACKRUN_POOL_TTL_MS", default_value_t = 2500)]
+    pub backrun_pool_ttl_ms: u64,
+
+    /// Upper bound on the number of candidate-target txs the backrun pairing pool
+    /// caches at once (oldest evicted first). Only used in policy mode.
+    #[arg(long, env = "MAGMA_BACKRUN_POOL_MAX", default_value_t = 4096)]
+    pub backrun_pool_max: usize,
 }
 
 impl Config {
