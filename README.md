@@ -1,5 +1,6 @@
 # magma-sidecar
 
+Test
 Rust **sidecar** for a Monad validator. It does two things, both described in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md):
 
 1. **HTTP ingress** for searchers — `POST /rpc/monad` transparently forwards JSON-RPC (e.g. `eth_sendRawTransaction`) into the Monad EL.
