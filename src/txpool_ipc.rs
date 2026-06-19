@@ -1,13 +1,16 @@
 //! Txpool Unix socket: subscribe to `EthTxPoolEvent` batches, score each `Insert`
 //! by the configured tip policy, and re-inject as RLP `EthTxPoolIpcTx` over the
 //! same socket. Same wire protocol as `monad-eth-txpool-ipc`.
+//!
+//! In `Policy` mode the loop owns a [`PendingPool`] so it can pair backrun bids
+//! with their target tx and emit *multiple* reinjections per Insert (the target,
+//! then the bid). See `crate::backrun` for the pairing logic.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_primitives::TxHash;
 use alloy_primitives::U256;
 use futures::{SinkExt, StreamExt};
@@ -16,8 +19,9 @@ use monad_eth_txpool_types::{EthTxPoolEventType, EthTxPoolIpcTx};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
+use crate::backrun::{PendingPool, Reinjection};
 use crate::metrics::{IpcState, Metrics};
-use crate::policy::{compute_priority, PolicyConfig};
+use crate::policy::PolicyConfig;
 
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -28,13 +32,15 @@ pub enum PriorityMode {
     /// file is supplied). This mode does **not** filter on the gateway
     /// allowlist because it has none — every Insert is reinjected.
     Constant(U256),
-    /// Score each tx via `policy::compute_priority`, but only for transactions
-    /// whose `to` is an allowlisted `MagmaSearcherGateway`. Vanilla traffic is
-    /// observed (for state tracking + metrics) but **not** reinjected, so the
-    /// node's default ordering applies to it.
+    /// Score each tx via the tip policy, pairing backrun bids with their target.
+    /// Only transactions whose `to` is an allowlisted `MagmaSearcherGateway`
+    /// (plus the targets they reference) are reinjected; vanilla traffic is
+    /// observed (for matching + metrics) but left to the node's own ordering.
     Policy {
         policy: Arc<PolicyConfig>,
         fallback: U256,
+        ttl: Duration,
+        max_entries: usize,
     },
 }
 
@@ -45,27 +51,31 @@ impl PriorityMode {
             PriorityMode::Policy { .. } => "policy",
         }
     }
+}
 
-    /// Decide the outbound priority for a tx under this mode.
-    ///
-    /// Returns `None` when the sidecar should leave the tx alone (no
-    /// reinjection). In `Policy` mode, that's any tx whose `to` is not on the
-    /// gateway allowlist — we don't want to compete with other sidecars or
-    /// override the node's own ordering for vanilla traffic.
-    ///
-    /// Extracted from the IPC loop so it's unit-testable without a real Unix
-    /// socket.
-    pub fn decide_priority(&self, tx: &TxEnvelope) -> Option<U256> {
-        match self {
-            PriorityMode::Constant(p) => Some(*p),
-            PriorityMode::Policy { policy, fallback } => {
-                let to = tx.to()?;
-                if !policy.is_allowlisted_gateway(&to) {
-                    return None;
-                }
-                let p = compute_priority(tx, policy);
-                Some(if p.is_zero() { *fallback } else { p })
-            }
+/// Per-mode runtime state, held across reconnects so the backrun pool isn't lost
+/// on a transient socket drop.
+enum ModeState {
+    Constant(U256),
+    // Boxed: `PendingPool` is much larger than the `Constant` variant.
+    Policy(Box<PendingPool>),
+}
+
+impl ModeState {
+    fn from_mode(mode: &PriorityMode) -> Self {
+        match mode {
+            PriorityMode::Constant(p) => ModeState::Constant(*p),
+            PriorityMode::Policy {
+                policy,
+                fallback,
+                ttl,
+                max_entries,
+            } => ModeState::Policy(Box::new(PendingPool::new(
+                policy.clone(),
+                *fallback,
+                *ttl,
+                *max_entries,
+            ))),
         }
     }
 }
@@ -82,6 +92,11 @@ pub async fn run_txpool_priority_loop(
 
     info!(mode = mode.describe(), "starting txpool reprioritizer");
     metrics.set_ipc_state(IpcState::Connecting);
+
+    // State persists across reconnects: the pool keeps pending bids / cached
+    // targets warm, and `sent` dedups echoes of txs we already reinjected.
+    let mut state = ModeState::from_mode(&mode);
+    let mut sent: HashMap<TxHash, U256> = HashMap::new();
 
     loop {
         if *shutdown.borrow() {
@@ -100,7 +115,6 @@ pub async fn run_txpool_priority_loop(
         info!(path = %socket_path.display(), "connected to Monad txpool IPC");
         metrics.set_ipc_state(IpcState::Connected);
         metrics.record_reconnect();
-        let mut prioritized: HashSet<TxHash> = HashSet::new();
 
         'connection: loop {
             tokio::select! {
@@ -125,36 +139,68 @@ pub async fn run_txpool_priority_loop(
                         match ev.action {
                             EthTxPoolEventType::Insert { tx, .. } => {
                                 let hash = ev.tx_hash;
-                                if prioritized.contains(&hash) {
+                                // Echo of a tx we already reinjected: ignore.
+                                if sent.contains_key(&hash) {
                                     continue;
                                 }
                                 metrics.record_insert();
-                                let Some(priority) = mode.decide_priority(&tx) else {
-                                    debug!(
-                                        ?hash,
-                                        "skipping reinjection: tx not bound for an allowlisted gateway"
-                                    );
-                                    metrics.record_skipped_non_gateway();
-                                    continue;
+
+                                let reinjections: Vec<Reinjection> = match &mut state {
+                                    ModeState::Constant(p) => {
+                                        vec![Reinjection { hash, tx, priority: *p }]
+                                    }
+                                    ModeState::Policy(pool) => {
+                                        let expired = pool.prune(Instant::now());
+                                        if expired > 0 {
+                                            metrics.add_backrun_expired(expired);
+                                        }
+                                        let res = pool.observe(hash, tx);
+                                        if res.skipped_non_gateway {
+                                            debug!(
+                                                ?hash,
+                                                "skipping reinjection: tx not bound for an allowlisted gateway"
+                                            );
+                                            metrics.record_skipped_non_gateway();
+                                        }
+                                        metrics.add_backrun_pairs(res.pairs_matched);
+                                        metrics.add_backrun_pended(res.bids_pended);
+                                        metrics.set_backrun_pending(pool.pending_len() as i64);
+                                        metrics.set_backrun_cache(pool.cache_len() as i64);
+                                        res.reinjections
+                                    }
                                 };
-                                debug!(?hash, %priority, "reinjecting with computed priority");
-                                let ipc = EthTxPoolIpcTx {
-                                    tx,
-                                    priority,
-                                    extra_data: vec![],
-                                };
-                                if let Err(e) = client.send(ipc).await {
-                                    warn!(?e, "txpool IPC send failed; reconnecting");
-                                    metrics.record_send_failure();
+
+                                let mut send_failed = false;
+                                for r in reinjections {
+                                    if sent.contains_key(&r.hash) {
+                                        continue;
+                                    }
+                                    debug!(hash = ?r.hash, priority = %r.priority, "reinjecting with computed priority");
+                                    let ipc = EthTxPoolIpcTx {
+                                        tx: r.tx,
+                                        priority: r.priority,
+                                        extra_data: vec![],
+                                    };
+                                    if let Err(e) = client.send(ipc).await {
+                                        warn!(?e, "txpool IPC send failed; reconnecting");
+                                        metrics.record_send_failure();
+                                        send_failed = true;
+                                        break;
+                                    }
+                                    metrics.record_prioritized();
+                                    sent.insert(r.hash, r.priority);
+                                }
+                                if send_failed {
                                     break 'connection;
                                 }
-                                metrics.record_prioritized();
-                                prioritized.insert(hash);
                             }
                             EthTxPoolEventType::Commit
                             | EthTxPoolEventType::Drop { .. }
                             | EthTxPoolEventType::Evict { .. } => {
-                                prioritized.remove(&ev.tx_hash);
+                                sent.remove(&ev.tx_hash);
+                                if let ModeState::Policy(pool) = &mut state {
+                                    pool.forget(ev.tx_hash);
+                                }
                             }
                         }
                     }
@@ -175,153 +221,42 @@ async fn sleep_or_shutdown(duration: Duration, shutdown: &mut watch::Receiver<bo
 mod tests {
     use super::*;
 
-    use alloy_consensus::{Signed, TxEip1559};
-    use alloy_primitives::{address, b256, Signature, TxKind};
-
-    fn dummy_envelope(value_wei: u64, to: alloy_primitives::Address) -> TxEnvelope {
-        let sig = Signature::new(U256::from(1u64), U256::from(1u64), false);
-        TxEnvelope::Eip1559(Signed::new_unchecked(
-            TxEip1559 {
-                chain_id: 1,
-                nonce: 0,
-                gas_limit: 21_000,
-                max_fee_per_gas: 100,
-                max_priority_fee_per_gas: 5,
-                to: TxKind::Call(to),
-                value: U256::from(value_wei),
-                access_list: Default::default(),
-                input: Default::default(),
-            },
-            sig,
-            b256!("00000000000000000000000000000000000000000000000000000000000000aa"),
-        ))
-    }
-
-    /// EIP-1559 tx to `gw` carrying a real `magmaSearcherGatewayCall(...)` with the
-    /// requested `bid_amount`. `value` is zero — the on-chain selector is
-    /// `nonpayable` so this is what production traffic actually looks like.
-    fn gateway_call_envelope(gw: alloy_primitives::Address, bid_amount: U256) -> TxEnvelope {
-        let sig = Signature::new(U256::from(1u64), U256::from(1u64), false);
-        TxEnvelope::Eip1559(Signed::new_unchecked(
-            TxEip1559 {
-                chain_id: 1,
-                nonce: 0,
-                gas_limit: 21_000,
-                max_fee_per_gas: 100,
-                max_priority_fee_per_gas: 5,
-                to: TxKind::Call(gw),
-                value: U256::ZERO,
-                access_list: Default::default(),
-                input: crate::policy::gateway_call_calldata(bid_amount),
-            },
-            sig,
-            b256!("00000000000000000000000000000000000000000000000000000000000000aa"),
-        ))
-    }
+    use crate::policy::PolicyConfig;
+    use alloy_primitives::address;
 
     #[test]
-    fn constant_mode_always_returns_constant() {
-        let mode = PriorityMode::Constant(U256::from(0xffffu64));
-        let tx = dummy_envelope(
-            1_000_000,
-            address!("00000000000000000000000000000000000000aa"),
-        );
-        assert_eq!(mode.decide_priority(&tx), Some(U256::from(0xffffu64)));
-    }
-
-    #[test]
-    fn policy_mode_uses_computed_score_for_gateway_tx() {
-        // Real gateway call (decoded `bidAmount = 1_000_000`) routed to an
-        // allowlisted gateway: priority should be the fee component plus the
-        // decoded bid, not the fallback. `tx.value` is zero — the on-chain
-        // selector is `nonpayable`, and the policy deliberately does not
-        // credit `tx.value` as a bid (see `policy` module docs).
-        let gw = address!("00000000000000000000000000000000000000bb");
-        let policy = PolicyConfig::for_test(gw, 0);
-        let mode = PriorityMode::Policy {
-            policy: Arc::new(policy),
-            fallback: U256::from(0xffffu64),
-        };
-        let tx = gateway_call_envelope(gw, U256::from(1_000_000u64));
-        // fee:  5 * 21_000 = 105_000
-        // bid:  1_000_000
-        // total:            1_105_000
-        assert_eq!(mode.decide_priority(&tx), Some(U256::from(1_105_000u64)));
-    }
-
-    #[test]
-    fn policy_mode_skips_non_gateway_tx() {
-        // Vanilla tx (high priority fee, but `to` is not on the allowlist) must
-        // not be reinjected — this is the production filter the sidecar relies
-        // on so it doesn't override the node's ordering for non-MEV traffic.
-        let gw = address!("00000000000000000000000000000000000000bb");
-        let other = address!("00000000000000000000000000000000000000cc");
-        let policy = PolicyConfig::for_test(gw, 0);
-        let mode = PriorityMode::Policy {
-            policy: Arc::new(policy),
-            fallback: U256::from(0xffffu64),
-        };
-        let tx = dummy_envelope(1_000_000, other);
-        assert_eq!(mode.decide_priority(&tx), None);
-    }
-
-    #[test]
-    fn policy_mode_skips_create_tx() {
-        // CREATE has no `to`, so it can't possibly be a gateway interaction.
-        let sig = Signature::new(U256::from(1u64), U256::from(1u64), false);
-        let create_tx = TxEnvelope::Eip1559(Signed::new_unchecked(
-            TxEip1559 {
-                chain_id: 1,
-                nonce: 0,
-                gas_limit: 21_000,
-                max_fee_per_gas: 100,
-                max_priority_fee_per_gas: 5,
-                to: TxKind::Create,
-                value: U256::ZERO,
-                access_list: Default::default(),
-                input: Default::default(),
-            },
-            sig,
-            b256!("00000000000000000000000000000000000000000000000000000000000000cc"),
-        ));
-        let gw = address!("00000000000000000000000000000000000000bb");
-        let policy = PolicyConfig::for_test(gw, 0);
-        let mode = PriorityMode::Policy {
-            policy: Arc::new(policy),
-            fallback: U256::from(0xffffu64),
-        };
-        assert_eq!(mode.decide_priority(&create_tx), None);
-    }
-
-    #[test]
-    fn policy_mode_falls_back_when_gateway_score_zero() {
-        // Gateway tx with zero priority fee and no `magmaSearcherGatewayCall` bid
-        // (empty calldata, zero value): computed score is zero, so we fall back to the
-        // constant rather than emitting a meaningless priority of 0.
-        let gw = address!("00000000000000000000000000000000000000bb");
-        let sig = Signature::new(U256::from(1u64), U256::from(1u64), false);
-        let zero_fee_gateway_tx = TxEnvelope::Eip1559(Signed::new_unchecked(
-            TxEip1559 {
-                chain_id: 1,
-                nonce: 0,
-                gas_limit: 21_000,
-                max_fee_per_gas: 0,
-                max_priority_fee_per_gas: 0,
-                to: TxKind::Call(gw),
-                value: U256::ZERO,
-                access_list: Default::default(),
-                input: Default::default(),
-            },
-            sig,
-            b256!("00000000000000000000000000000000000000000000000000000000000000bb"),
-        ));
-        let mode = PriorityMode::Policy {
-            policy: Arc::new(PolicyConfig::for_test(gw, 0)),
-            fallback: U256::from(0x42u64),
-        };
+    fn describe_reports_mode() {
         assert_eq!(
-            mode.decide_priority(&zero_fee_gateway_tx),
-            Some(U256::from(0x42u64))
+            PriorityMode::Constant(U256::from(1u64)).describe(),
+            "constant"
         );
+        let policy =
+            PolicyConfig::for_test(address!("00000000000000000000000000000000000000bb"), 0);
+        let mode = PriorityMode::Policy {
+            policy: Arc::new(policy),
+            fallback: U256::from(0xffffu64),
+            ttl: Duration::from_millis(2500),
+            max_entries: 16,
+        };
+        assert_eq!(mode.describe(), "policy");
+    }
+
+    #[test]
+    fn mode_state_builds_pool_for_policy() {
+        let policy =
+            PolicyConfig::for_test(address!("00000000000000000000000000000000000000bb"), 0);
+        let mode = PriorityMode::Policy {
+            policy: Arc::new(policy),
+            fallback: U256::from(0xffffu64),
+            ttl: Duration::from_millis(2500),
+            max_entries: 16,
+        };
+        match ModeState::from_mode(&mode) {
+            ModeState::Policy(pool) => {
+                assert_eq!(pool.pending_len(), 0);
+                assert_eq!(pool.cache_len(), 0);
+            }
+            ModeState::Constant(_) => panic!("expected policy state"),
+        }
     }
 }

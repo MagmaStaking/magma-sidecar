@@ -88,7 +88,17 @@ To reuse a previous volume and skip a full rebuild, use `nets/run.sh --cached-bu
 
 The execution container creates `mempool.sock` as `root:root` with mode `0755` (no `user:` mapping in `nets/compose.yaml`), and the per-run host path under `logs/<timestamp>-<hash>/node/...` typically lands at exactly **108 bytes** — one over the kernel's `AF_UNIX` `sun_path` limit of 107 usable bytes. Either alone is enough to make `connect(2)` fail; together they will produce a tight retry loop in the sidecar (`txpool IPC connect failed; retrying ...`).
 
-After `nets/run.sh` is up, run this once per run from a `sudo`-capable shell to fix both:
+After `nets/run.sh` is up, run this once per run to fix both. The repo ships a helper that finds
+the newest run's socket, `chmod`s it, and (re)points the short symlink — it calls `sudo` only for
+those two steps:
+
+```bash
+make link-socket            # or: ./scripts/link-txpool-socket.sh
+# Override the monad-bft location if it isn't a sibling checkout:
+#   MONAD_BFT_DIR=/path/to/monad-bft ./scripts/link-txpool-socket.sh
+```
+
+Equivalent manual steps, if you'd rather not use the script:
 
 ```bash
 SOCK=$(ls -td /path/to/monad-bft/docker/single-node/logs/*/node/mempool.sock | head -1)
@@ -97,7 +107,7 @@ SOCK=$(ls -td /path/to/monad-bft/docker/single-node/logs/*/node/mempool.sock | h
 sudo chmod 666 "$SOCK"
 
 # 2. Expose it under a short path that fits in sun_path
-sudo ln -sf "$SOCK" /tmp/monad-mempool.sock
+sudo ln -sfn "$SOCK" /tmp/monad-mempool.sock
 ls -lL /tmp/monad-mempool.sock   # sanity: srw-rw-rw-
 ```
 
@@ -174,9 +184,9 @@ Leave this process running.
 
 ---
 
-## 3. Deploy the Magma gateway and counter test stack
+## 3. Deploy the Magma gateway and test stack
 
-Contracts and scripts live in **`mev-entrypoint`**. The **counter-conflict** flow deploys **`MagmaSearcherGateway`**, **`BlockLimitedCounter`**, and two **`MagmaTipSearcher`** instances (see `mev-entrypoint/test-scripts/README.md`).
+Contracts and scripts live in **`mev-entrypoint`**. `make deploy` broadcasts `DeployCounterSearchers`, which deploys the allowlisted **`MagmaSearcherGateway`**, a shared **`BlockLimitedCounter`**, four ranked **`MagmaTipSearcher`** instances, a second (intentionally *unlisted*) gateway + searcher, the backrun stack — a **`MockArbPool`** with one target and three backrun **`MagmaArbSearcher`** instances — and the ordering stack — an unbounded **`OrderCounter`** with four **`MagmaOrderSearcher`** instances (see `mev-entrypoint/test-scripts/README.md`).
 
 With Monad RPC up on **8080**:
 
@@ -186,7 +196,7 @@ make build          # optional: forge + Rust CLI
 make deploy
 ```
 
-`make deploy` broadcasts `DeployCounterSearchers` and writes **`deployments.local.env`** with `GATEWAY`, `COUNTER`, `SEARCHER_A`, and `SEARCHER_B`. Defaults in the Makefile match Anvil-style dev keys and `RPC_URL=http://127.0.0.1:8080`.
+`make deploy` writes **`deployments.local.env`** with `GATEWAY`, `COUNTER`, `SEARCHER_A..D`, `UNLISTED_GATEWAY`, `UNLISTED_SEARCHER`, `ARB_POOL`, `TARGET_SEARCHER`, `BACKRUN_SEARCHER_B..D`, `ORDER_COUNTER`, and `ORDER_SEARCHER_A..D`. Defaults in the Makefile match Anvil-style dev keys and `RPC_URL=http://127.0.0.1:8080`. The `GATEWAY` it writes must match the `localnet` address baked into the sidecar's `src/policy.rs` (it does for a deterministic anvil-#0 deploy).
 
 You can target the deploy through the sidecar's `/rpc/monad` ingress instead of the node directly by overriding:
 
@@ -198,61 +208,42 @@ Both paths land the deployment txs in the same Monad txpool.
 
 ---
 
-## 4. Submit competing tip-bearing transactions
+## 4. Run the conflict tests
 
-The new flow drives `MagmaTipSearcher` directly with `eth_sendRawTransaction`; the sidecar observes both txs on the txpool, scores each by **priority fee + value paid into `MagmaSearcherGateway`**, and re-injects them with that priority. Only one `increment` can land per block (`BlockLimitedCounter`), so the higher-tip tx should win.
+The harness in `mev-entrypoint/test-scripts/` ships a set of `make test-*` targets that sign competing `magmaSearcherGatewayCall` txs and submit them via `eth_sendRawTransaction`. The sidecar observes them on the txpool, scores each by **`gas_limit × effective_priority_fee + bidAmount`** (see `src/policy.rs`), and re-injects with that priority — which is exactly what these tests assert. Each target exits non-zero on a mismatch, so they double as CI checks.
 
-Two ways to drive it:
-
-### A. `cast send` (manual, no harness changes needed)
-
-Source the deployment vars and submit two competing `execute` calls in the same block window. Direct each at the sidecar so the ingress path matches production:
+Point the harness at the sidecar's ingress so the path matches production (`RPC_URL=http://127.0.0.1:8089/rpc/monad`); the defaults submit to the node on `:8080` directly, which also works since both land in the same txpool.
 
 ```bash
 cd /path/to/mev-entrypoint/test-scripts
-set -a; source deployments.local.env; set +a
 
-SIDECAR=http://127.0.0.1:8089/rpc/monad
-
-# searcher A — tip 0.001 ETH
-cast send "$SEARCHER_A" \
-  "execute(uint256)" 1000000000000000 \
-  --rpc-url "$SIDECAR" \
-  --private-key "$PRIVATE_KEY_A" \
-  --value 1000000000000000 \
-  --async
-
-# searcher B — tip 0.002 ETH
-cast send "$SEARCHER_B" \
-  "execute(uint256)" 2000000000000000 \
-  --rpc-url "$SIDECAR" \
-  --private-key "$PRIVATE_KEY_B" \
-  --value 2000000000000000 \
-  --async
+make test-bundles          # one round: two competing txs; the higher bid wins the block
+make test-stress           # N rounds, alternating which side bids higher (verifies both directions)
+make test-ranking          # 4-way race at distinct bids, rotated each round; strict bid ordering
+make test-non-gateway-noop # allowlist gate: a low bid via GATEWAY beats a higher bid via UNLISTED_GATEWAY
+make test-backrun          # backrun ordering: a high-gas-price target opens a one-shot arb, and the
+                           # highest-bidding backrun lands DIRECTLY below it — exercises BOTH terms of
+                           # the score (gas_limit × gas_price for the target, bidAmount for the backruns)
+make test-order            # full in-block ordering: N non-conflicting txs at distinct bids all succeed
+                           # in one block; asserts their transaction_index is exactly descending bid
+make counter-read          # read count() / lastIncrementBlock() after a counter-based run
 ```
 
-Read which one landed:
+Common tunables (see `test-scripts/README.md` and the Makefile): `RPC_URL`, `ROUNDS`, `TIP_*_ETHER`, `DELAY_MS`, `RECEIPT_TIMEOUT_SECS`. For example, to drive everything through the sidecar:
 
 ```bash
-make counter-read
-# count() should bump by 1; lastIncrementBlock() should match the inclusion block
+make test-ranking RPC_URL=http://127.0.0.1:8089/rpc/monad
 ```
 
-Re-run with different `--value` / function-arg pairs to confirm the higher-tip tx consistently wins.
+### Correlating with sidecar logs
 
-> The `execute(uint256)` selector and value semantics here are illustrative — match them to the actual `MagmaTipSearcher` interface in `mev-entrypoint/test-scripts/contracts/MagmaTipSearcher.sol` (the on-chain entrypoint that calls `MagmaSearcherGateway` and pays `bidAmount`).
+With `RUST_LOG=info,magma_sidecar=debug` (the `.env.local` default from §2), each reprioritized tx logs a line like:
 
-### B. `make bundles` (after harness update)
-
-The existing `make bundles` target submits to `RBUILDER_URL` via `eth_sendBundle`. In the new architecture, that target is being repointed to submit two pre-signed `eth_sendRawTransaction`s to the sidecar's `/rpc/monad` ingress instead. Once that change lands, the workflow becomes:
-
-```bash
-cd /path/to/mev-entrypoint/test-scripts
-make bundles SIDECAR_URL=http://127.0.0.1:8089/rpc/monad
-make counter-read
+```
+DEBUG magma_sidecar: reinjecting with computed priority hash=0x… priority=160000000000003000000000000000
 ```
 
-Track the harness update in `mev-entrypoint/test-scripts/`.
+and non-allowlisted traffic logs `skipping reinjection: tx not bound for an allowlisted gateway`. `make test-backrun` prints the exact `prio=` it expects per leg (in wei), so you can match those numbers against the `priority=` values in these debug lines — the target's priority should be the largest, the winning backrun's second. `make test-non-gateway-noop` is the easiest way to see the `skipping reinjection` path (the unlisted-gateway leg). The `/health` and `/metrics` counters (`tx_prioritized`, `tx_skipped_non_gateway`) move accordingly.
 
 ---
 
@@ -261,9 +252,9 @@ Track the harness update in `mev-entrypoint/test-scripts/`.
 Three terminals plus a one-shot fix-up after each fresh `nets/run.sh`:
 
 1. **`monad-bft`**: `cd docker/single-node && nets/run.sh --use-prebuilt`
-2. **Socket fix-up** (per fresh run, see §1a — not a long-running process): `SOCK=$(ls -td /path/to/monad-bft/docker/single-node/logs/*/node/mempool.sock | head -1) && sudo chmod 666 "$SOCK" && sudo ln -sf "$SOCK" /tmp/monad-mempool.sock`
+2. **Socket fix-up** (per fresh run, see §1a — not a long-running process): `make link-socket` (in `magma-sidecar/`)
 3. **`magma-sidecar`**: `set -a; source .env.local; set +a; cargo run --release` (one-time setup: `cp .env.example .env.local`)
-4. **Conflict test**: `cd mev-entrypoint/test-scripts && make deploy && cast send ...` (see §4)
+4. **Conflict tests**: `cd mev-entrypoint/test-scripts && make deploy && make test-bundles` (also `test-stress` / `test-ranking` / `test-non-gateway-noop` / `test-backrun` / `test-order`; see §4)
 
 End-to-end data path: **searcher tx → magma-sidecar `/rpc/monad`** → **Monad txpool** → **magma-sidecar reads `EthTxPoolEvent`s, scores by tip, re-injects with priority** → **node honors priority for next block** → **on-chain test contracts**.
 

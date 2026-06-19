@@ -133,6 +133,8 @@ mod tests {
             txpool_socket: None,
             tx_priority_hex: "0xffff".into(),
             network: None,
+            backrun_pool_ttl_ms: 2500,
+            backrun_pool_max: 4096,
         };
         HttpState::try_new(config, Metrics::new()).expect("state")
     }

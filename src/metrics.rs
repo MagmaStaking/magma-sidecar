@@ -58,6 +58,13 @@ pub struct Metrics {
     pub last_event_unix_seconds: IntGauge,
     pub last_send_unix_seconds: IntGauge,
 
+    // ---- Backrun pairing ----
+    pub backrun_pairs_matched_total: IntCounter,
+    pub backrun_bids_pended_total: IntCounter,
+    pub backrun_bids_expired_total: IntCounter,
+    pub backrun_pending: IntGauge,
+    pub backrun_cache: IntGauge,
+
     // ---- HTTP ----
     pub http_requests_total: IntCounterVec, // labels: route, status_class
 
@@ -144,6 +151,41 @@ impl Metrics {
         )
         .expect("register http_requests_total");
 
+        let backrun_pairs_matched_total = register_int_counter_with_registry!(
+            "backrun_pairs_matched_total",
+            "Number of (target -> backrun bid) pairings completed.",
+            registry
+        )
+        .expect("register backrun_pairs_matched_total");
+
+        let backrun_bids_pended_total = register_int_counter_with_registry!(
+            "backrun_bids_pended_total",
+            "Number of backrun bids parked because their target wasn't pooled yet.",
+            registry
+        )
+        .expect("register backrun_bids_pended_total");
+
+        let backrun_bids_expired_total = register_int_counter_with_registry!(
+            "backrun_bids_expired_total",
+            "Number of parked backrun bids that expired without ever matching a target.",
+            registry
+        )
+        .expect("register backrun_bids_expired_total");
+
+        let backrun_pending = register_int_gauge_with_registry!(
+            "backrun_pending",
+            "Backrun bids currently parked waiting for their target.",
+            registry
+        )
+        .expect("register backrun_pending");
+
+        let backrun_cache = register_int_gauge_with_registry!(
+            "backrun_cache",
+            "Candidate-target txs currently cached for backrun pairing.",
+            registry
+        )
+        .expect("register backrun_cache");
+
         let m = Self {
             registry,
             txpool_events_total,
@@ -155,6 +197,11 @@ impl Metrics {
             txpool_ipc_state,
             last_event_unix_seconds,
             last_send_unix_seconds,
+            backrun_pairs_matched_total,
+            backrun_bids_pended_total,
+            backrun_bids_expired_total,
+            backrun_pending,
+            backrun_cache,
             http_requests_total,
             last_event_ts: AtomicI64::new(0),
             last_send_ts: AtomicI64::new(0),
@@ -189,6 +236,32 @@ impl Metrics {
 
     pub fn record_skipped_non_gateway(&self) {
         self.txpool_skipped_non_gateway_total.inc();
+    }
+
+    pub fn add_backrun_pairs(&self, n: u64) {
+        if n > 0 {
+            self.backrun_pairs_matched_total.inc_by(n);
+        }
+    }
+
+    pub fn add_backrun_pended(&self, n: u64) {
+        if n > 0 {
+            self.backrun_bids_pended_total.inc_by(n);
+        }
+    }
+
+    pub fn add_backrun_expired(&self, n: u64) {
+        if n > 0 {
+            self.backrun_bids_expired_total.inc_by(n);
+        }
+    }
+
+    pub fn set_backrun_pending(&self, n: i64) {
+        self.backrun_pending.set(n);
+    }
+
+    pub fn set_backrun_cache(&self, n: i64) {
+        self.backrun_cache.set(n);
     }
 
     pub fn record_send_failure(&self) {
@@ -229,6 +302,9 @@ impl Metrics {
             tx_skipped_non_gateway: self.txpool_skipped_non_gateway_total.get(),
             ipc_send_failures: self.txpool_send_failures_total.get(),
             ipc_reconnects: self.txpool_ipc_reconnects_total.get(),
+            backrun_pairs_matched: self.backrun_pairs_matched_total.get(),
+            backrun_bids_pending: self.backrun_pending.get(),
+            backrun_bids_expired: self.backrun_bids_expired_total.get(),
             last_event_unix_seconds: nonzero(self.last_event_ts.load(Ordering::Relaxed)),
             last_send_unix_seconds: nonzero(self.last_send_ts.load(Ordering::Relaxed)),
         }
@@ -268,6 +344,9 @@ pub struct HealthSnapshot {
     pub tx_skipped_non_gateway: u64,
     pub ipc_send_failures: u64,
     pub ipc_reconnects: u64,
+    pub backrun_pairs_matched: u64,
+    pub backrun_bids_pending: i64,
+    pub backrun_bids_expired: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_event_unix_seconds: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

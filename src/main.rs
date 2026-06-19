@@ -2,6 +2,7 @@
 //!
 //! See `docs/ARCHITECTURE.md` for the end-to-end design.
 
+mod backrun;
 mod config;
 mod error;
 mod forward;
@@ -12,6 +13,7 @@ mod txpool_ipc;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use config::Config;
@@ -49,6 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             PriorityMode::Policy {
                 policy: Arc::new(policy),
                 fallback: fallback_priority,
+                ttl: Duration::from_millis(config.backrun_pool_ttl_ms),
+                max_entries: config.backrun_pool_max,
             }
         }
         None => {

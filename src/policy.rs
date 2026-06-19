@@ -17,11 +17,20 @@
 //! - `bid_routed_to_MagmaSearcherGateway` is the statically detectable bid into
 //!   the network's single allowlisted gateway. We only count it when `to ==
 //!   gateway` AND calldata is `magmaSearcherGatewayCall(address, uint256
-//!   bidAmount, address, bytes)` — we then decode `bidAmount` from calldata.
-//!   This is the on-chain enforced minimum net ETH gain on the gateway (see
-//!   `mev-entrypoint/src/MagmaSearcherGateway.sol`) and is the right number to
-//!   rank by, since `magmaSearcherGatewayCall` is `nonpayable` and so
-//!   `tx.value` is always 0 on this path.
+//!   bidAmount, uint64, bytes32, bool, address, bytes)` — we then decode
+//!   `bidAmount` from calldata. This is the on-chain enforced minimum net ETH
+//!   gain on the gateway; on success it is split into a fixed protocol fee plus a
+//!   validator reward routed to the block proposer (resolved via the Monad
+//!   staking precompile's `getProposerValId()` and keyed by `validatorId`,
+//!   accrued until a recipient is set — see
+//!   `mev-entrypoint/src/MagmaSearcherGateway.sol`). The validator reward is a
+//!   fixed fraction of `bidAmount`, so `bidAmount` preserves the correct ranking
+//!   order and is the right number to rank by.
+//!
+//!   `magmaSearcherGatewayCall` is now `payable`, but any `tx.value` is forwarded
+//!   to the searcher (working capital for the MEV op), not paid to the validator.
+//!   We therefore still rank purely by the decoded `bidAmount` and deliberately do
+//!   *not* add `tx.value` to the bid component.
 //!
 //!   Anything else to the gateway address — empty calldata, a non-matching
 //!   selector, a direct `receive()` top-up — gets a bid component of zero. We
@@ -41,7 +50,7 @@
 //! and ignores gateway scoring entirely.
 
 use alloy_consensus::{Transaction, TxEnvelope};
-use alloy_primitives::{address, Address, U256};
+use alloy_primitives::{address, Address, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use clap::ValueEnum;
 
@@ -53,9 +62,12 @@ sol! {
         function magmaSearcherGatewayCall(
             address sender,
             uint256 bidAmount,
+            uint64 targetBlockNumber,
+            bytes32 targetTxHash,
+            bool requireExclusiveSlot,
             address searcherContract,
             bytes searcherCallData
-        ) external;
+        ) external payable;
     }
 }
 
@@ -84,7 +96,7 @@ impl Network {
             // TODO(magma): replace with the real testnet gateway address once deployed.
             Self::Testnet => address!("0000000000000000000000000000000000000000"),
             // Deterministic deployment from `make deploy` in mev-entrypoint/test-scripts/.
-            Self::Localnet => address!("8f86403a4de0bb5791fa46b8e795c547942fe4cf"),
+            Self::Localnet => address!("0xe7f1725e7734ce288f8367e1bb143e90bb3f0512"),
         }
     }
 
@@ -177,10 +189,30 @@ pub fn compute_priority(tx: &TxEnvelope, policy: &PolicyConfig) -> U256 {
     fee_component.saturating_add(bid_component)
 }
 
-/// Decode the `bidAmount` argument of `MagmaSearcherGateway.magmaSearcherGatewayCall`
-/// from the tx's calldata. Returns `None` when the selector doesn't match; the caller
-/// treats that as a zero bid (we do not fall back to `tx.value` — see module docs).
-fn gateway_bid_amount(tx: &TxEnvelope) -> Option<U256> {
+/// The fields of a decoded `magmaSearcherGatewayCall` that the sidecar uses for
+/// ordering. We only keep `bidAmount` (the rank) and `targetTxHash` (the backrun
+/// linkage); everything else is for on-chain enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewayCall {
+    /// On-chain enforced minimum net ETH gain — the number we rank by.
+    pub bid_amount: U256,
+    /// Zero for a lead-block (top-of-block) bid; otherwise the hash of the tx
+    /// this bid wants to land immediately behind.
+    pub target_tx_hash: B256,
+}
+
+impl GatewayCall {
+    /// True for a lead-block bid. Mirrors the contract's
+    /// `leadBlock = targetTxHash == bytes32(0)`.
+    pub fn is_tob(&self) -> bool {
+        self.target_tx_hash == B256::ZERO
+    }
+}
+
+/// Decode `MagmaSearcherGateway.magmaSearcherGatewayCall` from a tx's calldata.
+/// Returns `None` when the selector doesn't match. Does *not* check `to`; callers
+/// that care about the allowlist must check `tx.to()` against the gateway first.
+pub fn decode_gateway_call(tx: &TxEnvelope) -> Option<GatewayCall> {
     let input = tx.input();
     if input.len() < 4 {
         return None;
@@ -192,20 +224,108 @@ fn gateway_bid_amount(tx: &TxEnvelope) -> Option<U256> {
     // `abi_decode_raw` consumes the args portion (without the 4-byte selector).
     let call =
         IMagmaSearcherGateway::magmaSearcherGatewayCallCall::abi_decode_raw(&input[4..]).ok()?;
-    Some(call.bidAmount)
+    Some(GatewayCall {
+        bid_amount: call.bidAmount,
+        target_tx_hash: call.targetTxHash,
+    })
 }
 
-/// Build calldata for `magmaSearcherGatewayCall(sender, bidAmount, searcher, data)`.
+/// Decode just the `bidAmount` argument (the rank). Returns `None` when the
+/// selector doesn't match; the caller treats that as a zero bid (we do not fall
+/// back to `tx.value` — see module docs).
+fn gateway_bid_amount(tx: &TxEnvelope) -> Option<U256> {
+    decode_gateway_call(tx).map(|c| c.bid_amount)
+}
+
+// ----------------------------------------------------------------------------
+// Structured priority encoding for backrun pairing.
+//
+// A flat `fee + bid` scalar ranks a backrun bid *absolutely*, which pushes a
+// large bid ahead of the very tx it wants to backrun. Backruns need *relative*
+// placement ("immediately behind tx X"), so we lay out the 256-bit priority into
+// fields that keep a target and its bids adjacent:
+//
+//   TOB bid          : bit 255 = 1 | low 128 bits = fee + bid
+//   backrun target   : bit 255 = 0 | backrun_id (bits 254..129) | bit 128 = 1
+//   backrun bid      : bit 255 = 0 | backrun_id (bits 254..129) | bit 128 = 0 | low 128 = fee + bid
+//
+// Consequences: any TOB (>= 2^255) outranks every backrun group (< 2^255); within
+// a group the target (bit 128 set) sits just above its bids; competing bids on the
+// same target self-order by the *same* `fee + bid` scalar TOB uses — i.e. by total
+// realized validator value (`priority_fee * gas_limit + bidAmount`), so the bid
+// seated behind the target is the one that pays the proposer the most, whether via
+// the gateway bid or via gas. Vanilla node-default priorities are small and sort
+// below everything we structure here.
+// ----------------------------------------------------------------------------
+
+/// Marker bit for a top-of-block bid (the most significant bit).
+const TOB_MARKER_BIT: usize = 255;
+/// Marker bit that lifts a backrun target just above its bids within the group.
+const OPPORTUNITY_MARKER_BIT: usize = 128;
+/// Left-shift applied to the `backrun_id` so it occupies bits 254..129.
+const GROUP_KEY_SHIFT: usize = 129;
+/// Width of the `backrun_id` group key, in bits.
+const BACKRUN_ID_BITS: usize = 126;
+
+/// `2^128 - 1`, used to clamp the payload into the low 128 bits.
+fn low_128_mask() -> U256 {
+    (U256::from(1u8) << 128) - U256::from(1u8)
+}
+
+/// Encode a top-of-block bid: bit 255 set, the `fee + bid` scalar in the low 128
+/// bits so higher-tip TOB bids still win against each other.
+pub fn encode_tob_priority(scalar: U256) -> U256 {
+    (U256::from(1u8) << TOB_MARKER_BIT) | (scalar & low_128_mask())
+}
+
+/// The group key shared by a backrun target and its bids: the top 126 bits of the
+/// target transaction hash. Deterministic, so the target and every bid that
+/// references it compute the same key.
+pub fn backrun_id(target: B256) -> U256 {
+    U256::from_be_slice(target.as_slice()) >> (256 - BACKRUN_ID_BITS)
+}
+
+/// Encode the target ("opportunity") tx so it sorts at the top of its backrun
+/// group — immediately above every bid that references it.
+pub fn encode_opportunity_priority(target: B256) -> U256 {
+    (backrun_id(target) << GROUP_KEY_SHIFT) | (U256::from(1u8) << OPPORTUNITY_MARKER_BIT)
+}
+
+/// Encode a backrun bid: same group key as its target, opportunity bit clear, and
+/// the `fee + bid` scalar (`compute_priority`) in the low 128 bits so competing bids
+/// self-order by **total realized validator value** (`priority_fee * gas_limit +
+/// bidAmount`) — the same scalar a TOB bid uses. The winner seated directly behind
+/// the target is therefore the bid that pays the proposer the most, regardless of
+/// whether that value arrives via the gateway bid or via gas.
+pub fn encode_backrun_bid_priority(target: B256, scalar: U256) -> U256 {
+    (backrun_id(target) << GROUP_KEY_SHIFT) | (scalar & low_128_mask())
+}
+
+/// Build calldata for `magmaSearcherGatewayCall(sender, bidAmount, targetBlockNumber,
+/// targetTxHash, requireExclusiveSlot, searcher, data)`.
 ///
 /// Test-only helper, shared across modules so tests for the txpool IPC layer can
 /// exercise the same bid-decoding path as the policy tests without duplicating
 /// the ABI encoder.
 #[cfg(test)]
 pub(crate) fn gateway_call_calldata(bid_amount: U256) -> alloy_primitives::Bytes {
+    gateway_call_calldata_with_target(bid_amount, B256::ZERO)
+}
+
+/// Like `gateway_call_calldata`, but with an explicit `targetTxHash` so tests can
+/// build backrun bids (non-zero target) as well as lead-block bids (zero target).
+#[cfg(test)]
+pub(crate) fn gateway_call_calldata_with_target(
+    bid_amount: U256,
+    target: B256,
+) -> alloy_primitives::Bytes {
     use alloy_primitives::Bytes;
     IMagmaSearcherGateway::magmaSearcherGatewayCallCall {
         sender: address!("00000000000000000000000000000000000000ee"),
         bidAmount: bid_amount,
+        targetBlockNumber: 0,
+        targetTxHash: target,
+        requireExclusiveSlot: false,
         searcherContract: address!("00000000000000000000000000000000000000ff"),
         searcherCallData: Bytes::from_static(b"opaque"),
     }
@@ -307,7 +427,8 @@ mod tests {
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 5,
             to: TxKind::Call(gw),
-            // Non-payable on-chain, so always 0 in practice.
+            // Payable on-chain, but any value is forwarded to the searcher, not
+            // counted as a bid. Bid component comes purely from decoded `bidAmount`.
             value: U256::ZERO,
             access_list: Default::default(),
             input: gateway_call_calldata(U256::from(7_000_000u64)),
@@ -407,5 +528,106 @@ mod tests {
         assert_eq!(p.gateway(), Network::Localnet.gateway());
         assert!(p.is_allowlisted_gateway(&Network::Localnet.gateway()));
         assert!(!p.is_allowlisted_gateway(&Address::ZERO));
+    }
+
+    fn target(byte: u8) -> B256 {
+        let mut b = [0u8; 32];
+        b[0] = byte;
+        B256::from(b)
+    }
+
+    #[test]
+    fn decode_gateway_call_extracts_bid_and_target() {
+        use alloy_consensus::{Signed, TxEip1559};
+        use alloy_primitives::TxKind;
+        let t = target(0xab);
+        let tx = TxEnvelope::Eip1559(Signed::new_unchecked(
+            TxEip1559 {
+                chain_id: 1,
+                nonce: 0,
+                gas_limit: 21_000,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 5,
+                to: TxKind::Call(address!("00000000000000000000000000000000000000bb")),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                input: gateway_call_calldata_with_target(U256::from(42u64), t),
+            },
+            dummy_sig(),
+            b256!("0000000000000000000000000000000000000000000000000000000000000003"),
+        ));
+        let call = decode_gateway_call(&tx).expect("decodes");
+        assert_eq!(call.bid_amount, U256::from(42u64));
+        assert_eq!(call.target_tx_hash, t);
+        assert!(!call.is_tob());
+
+        // Zero target => lead-block / TOB.
+        let tob = decode_gateway_call(&{
+            TxEnvelope::Eip1559(Signed::new_unchecked(
+                TxEip1559 {
+                    chain_id: 1,
+                    nonce: 0,
+                    gas_limit: 21_000,
+                    max_fee_per_gas: 100,
+                    max_priority_fee_per_gas: 5,
+                    to: TxKind::Call(address!("00000000000000000000000000000000000000bb")),
+                    value: U256::ZERO,
+                    access_list: Default::default(),
+                    input: gateway_call_calldata(U256::from(1u64)),
+                },
+                dummy_sig(),
+                b256!("0000000000000000000000000000000000000000000000000000000000000004"),
+            ))
+        })
+        .expect("decodes");
+        assert!(tob.is_tob());
+    }
+
+    #[test]
+    fn tob_outranks_every_backrun() {
+        // Even a 1-wei TOB bid must sit above a maxed-out backrun group.
+        let tob = encode_tob_priority(U256::from(1u64));
+        let big_target = B256::from([0xffu8; 32]);
+        let opp = encode_opportunity_priority(big_target);
+        let bid = encode_backrun_bid_priority(big_target, low_128_mask());
+        assert!(tob > opp, "TOB must outrank any opportunity");
+        assert!(tob > bid, "TOB must outrank any backrun bid");
+        assert!(tob.bit(TOB_MARKER_BIT));
+    }
+
+    #[test]
+    fn opportunity_sits_just_above_its_bids() {
+        let t = target(0x10);
+        let opp = encode_opportunity_priority(t);
+        let hi = encode_backrun_bid_priority(t, U256::from(1_000_000u64));
+        let lo = encode_backrun_bid_priority(t, U256::from(1u64));
+        assert!(opp > hi, "target must outrank its highest bid");
+        assert!(hi > lo, "higher bid wins within a group");
+    }
+
+    #[test]
+    fn same_target_shares_group_other_targets_do_not() {
+        let t1 = target(0x10);
+        let t2 = target(0x20);
+        // Opportunity and bid for the same target share the group key (bits >> 129).
+        let group = |p: U256| p >> GROUP_KEY_SHIFT;
+        assert_eq!(
+            group(encode_opportunity_priority(t1)),
+            group(encode_backrun_bid_priority(t1, U256::from(5u64)))
+        );
+        // Distinct targets land in distinct groups.
+        assert_ne!(
+            group(encode_opportunity_priority(t1)),
+            group(encode_opportunity_priority(t2))
+        );
+    }
+
+    #[test]
+    fn backrun_groups_sit_above_vanilla_priorities() {
+        // A node-default-ish vanilla priority (small) ranks below any backrun group.
+        let t = target(0x01);
+        let vanilla = U256::from(0xffffu64);
+        assert!(encode_backrun_bid_priority(t, U256::from(1u64)) > vanilla);
+        assert!(encode_opportunity_priority(t) > vanilla);
     }
 }
