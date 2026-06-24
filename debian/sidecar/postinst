@@ -23,8 +23,10 @@ case "$1" in
         fi
 
         # Register/reload the unit with systemd, but *do not* enable it
-        # automatically — operators must edit /etc/magma-sidecar/sidecar.env and
-        # drop a real policy.toml before the service is safe to start.
+        # automatically — operators must edit /etc/magma-sidecar/sidecar.env
+        # (at minimum MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, MAGMA_NETWORK)
+        # before the service is safe to start. The gateway address per network
+        # is baked into the binary; there is no policy file to drop in.
         if [ -d /run/systemd/system ]; then
             systemctl --system daemon-reload >/dev/null || true
             # Honour operator's prior enable/disable state on upgrades.

@@ -42,6 +42,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let priority_mode = match config.network {
         Some(network) => {
             let policy = PolicyConfig::for_network(network);
+            // Refuse to start a network whose gateway address isn't baked into
+            // this build yet (mainnet/testnet placeholders resolve to 0x0). A tx
+            // can never target 0x0, so the allowlist would match nothing and the
+            // sidecar would run as a silent no-op reprioritizer — the worst
+            // failure mode for a validator. Fail loudly instead.
+            if policy.gateway_is_unset() {
+                return Err(format!(
+                    "network '{}' has no MagmaSearcherGateway address baked into this build \
+                     (resolves to the zero address); refusing to start a no-op reprioritizer. \
+                     Upgrade to a release that bakes in the '{}' gateway, or use \
+                     --network localnet for local development.",
+                    network.as_str(),
+                    network.as_str(),
+                )
+                .into());
+            }
             tracing::info!(
                 network = network.as_str(),
                 gateway = %policy.gateway(),
