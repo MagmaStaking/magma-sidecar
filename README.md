@@ -202,12 +202,4 @@ curl -s http://127.0.0.1:8089/rpc/monad \
 ## Related repos
 
 - `mev-entrypoint` — `MagmaSearcherGateway` contracts and test scripts
-- `monad-bft` — node (txpool IPC protocol lives here; this repo links via `path` deps for types)
-
-## Roadmap
-
-The implementation now matches `docs/ARCHITECTURE.md`. Open follow-ups:
-
-- **Tighten bid attribution beyond direct calls:** today the bid component is read only from `magmaSearcherGatewayCall` calldata, which requires `to == gateway`. Sub-call attribution (a wrapper / proxy that calls the gateway internally) and event-based readback are the "future tightening" called out in the architecture doc §"Tip classification fidelity".
-- **Backrun pairing & richer policies:** the `PriorityMode::Policy` decision is per-tx; pair-aware scoring would be a new mode behind the same surface.
-- **Integration test against a fake IPC socket:** the IPC loop's I/O path is currently exercised end-to-end only in dev (`docs/LOCAL_DEVELOPMENT.md`).
+- `monad-bft` — node (txpool IPC protocol lives here; this repo links the IPC type crates as git deps pinned by `rev`, with an optional sibling-checkout `path` override for local dev)

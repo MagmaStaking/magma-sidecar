@@ -153,6 +153,16 @@ impl PolicyConfig {
         *addr == self.gateway
     }
 
+    /// True when this policy's gateway is the zero address — i.e. the selected
+    /// network has no real gateway baked into this build yet (the
+    /// mainnet/testnet placeholders in [`Network::gateway`]). A tx can never be
+    /// `to == 0x0`, so a policy in this state would silently match nothing and
+    /// reinject no MEV traffic. Callers should refuse to start rather than run
+    /// a no-op reprioritizer; see `main.rs`.
+    pub fn gateway_is_unset(&self) -> bool {
+        self.gateway == Address::ZERO
+    }
+
     /// Per-network base-fee floor applied to `priority_fee_or_price()` clamps.
     pub fn base_fee_floor_wei(&self) -> u128 {
         self.base_fee_floor_wei
@@ -528,6 +538,19 @@ mod tests {
         assert_eq!(p.gateway(), Network::Localnet.gateway());
         assert!(p.is_allowlisted_gateway(&Network::Localnet.gateway()));
         assert!(!p.is_allowlisted_gateway(&Address::ZERO));
+    }
+
+    #[test]
+    fn gateway_is_unset_detects_zero_address() {
+        // The startup guard in main.rs relies on this to refuse to start a
+        // network whose gateway address hasn't been baked in yet (resolves to
+        // 0x0). Tested via `for_test` so it stays correct regardless of which
+        // real networks happen to have addresses filled in.
+        assert!(PolicyConfig::for_test(Address::ZERO, 0).gateway_is_unset());
+        assert!(
+            !PolicyConfig::for_test(address!("00000000000000000000000000000000000000bb"), 0)
+                .gateway_is_unset()
+        );
     }
 
     fn target(byte: u8) -> B256 {

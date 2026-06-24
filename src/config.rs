@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crate::policy::Network;
 
-/// Parse hex `U256` for `--tx-priority` (with or without `0x`).
+/// Parse hex `U256` for `--tx-priority-hex` (with or without `0x`).
 pub fn parse_u256_hex(s: &str) -> Result<U256, String> {
     let s = s.trim();
     let hex = s

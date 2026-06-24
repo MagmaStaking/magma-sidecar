@@ -175,8 +175,10 @@ jobs:
             wget https://github.com/hydrogen-labs/magma-sidecar/releases/download/${{ github.ref_name }}/${{ env.PACKAGE_NAME }}_${{ needs.determine-version.outputs.version }}_${ARCH}.deb
             sudo dpkg -i ${{ env.PACKAGE_NAME }}_${{ needs.determine-version.outputs.version }}_${ARCH}.deb
 
+            # At minimum set MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, and
+            # MAGMA_NETWORK (mainnet | testnet | localnet). The gateway address
+            # for each network is baked into the binary — no policy file to drop in.
             sudo vim /etc/magma-sidecar/sidecar.env
-            sudo cp /etc/magma-sidecar/policy.example.toml /etc/magma-sidecar/policy.toml
             sudo systemctl enable --now magma-sidecar
             sudo systemctl status magma-sidecar
             ```
@@ -185,7 +187,7 @@ jobs:
 
             - Binary: `/usr/bin/magma-sidecar`
             - Systemd unit: `magma-sidecar.service`
-            - Config: `/etc/magma-sidecar/{sidecar.env,policy.toml}` (seeded from `*.example` on first install)
+            - Config: `/etc/magma-sidecar/sidecar.env` (seeded from `sidecar.env.example` on first install)
 
             Docker image: `ghcr.io/hydrogen-labs/magma-sidecar:${{ needs.determine-version.outputs.version }}`
         env:
