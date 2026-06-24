@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let config = Config::parse();
     let fallback_priority = config::parse_u256_hex(&config.tx_priority_hex).map_err(|e| {
-        format!("invalid --tx-priority / MAGMA_TX_PRIORITY ({e}); use hex, e.g. 0xffff or ffff")
+        format!("invalid --tx-priority-hex / MAGMA_TX_PRIORITY ({e}); use hex, e.g. 0xffff or ffff")
     })?;
 
     let priority_mode = match config.network {

@@ -262,6 +262,29 @@ End-to-end data path: **searcher tx → magma-sidecar `/rpc/monad`** → **Monad
 
 ## Troubleshooting
 
+### Monad single-node won't start / `nets/run.sh` fails on host tuning
+
+The node needs hugepages and enlarged UDP/TCP socket buffers before it will come
+up. If `nets/run.sh` (§1) fails to start or the node crashes early, apply the
+host tuning from the [monad-bft README](https://github.com/category-labs/monad-bft#getting-started)
+once per boot:
+
+```bash
+# Hugepages allocation
+sudo sysctl -w vm.nr_hugepages=2048
+# UDP buffer sizes
+sudo sysctl -w net.core.rmem_max=62500000
+sudo sysctl -w net.core.rmem_default=62500000
+sudo sysctl -w net.core.wmem_max=62500000
+sudo sysctl -w net.core.wmem_default=62500000
+# TCP buffer sizes
+sudo sysctl -w net.ipv4.tcp_rmem='4096 12582912 12582912'
+sudo sysctl -w net.ipv4.tcp_wmem='4096 12582912 12582912'
+```
+
+These are reset on reboot. To make them persistent, drop them in a
+`/etc/sysctl.d/99-custom-monad.conf` file as described in the monad-bft README.
+
 ### `txpool IPC connect failed; retrying path=/tmp/monad-mempool.sock`
 
 The sidecar is reaching a socket path, but `connect(2)` is being rejected. In a local single-node setup this is almost always one of three things; check them in order.
