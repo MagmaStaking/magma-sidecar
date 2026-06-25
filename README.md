@@ -27,9 +27,11 @@ sudo apt update
 sudo apt install magma-sidecar
 # Or a specific version:  sudo apt install magma-sidecar=1.0.0
 
-# Configure: at minimum set MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, and
-# MAGMA_NETWORK (mainnet | testnet | localnet). The gateway address for each
-# network is baked into the binary; no extra config file to drop in.
+# Configure: at minimum set MAGMA_MONAD_RPC_URL and MAGMA_NETWORK
+# (mainnet | testnet | localnet). MAGMA_TXPOOL_SOCKET defaults to the standard
+# monad-bft path (/home/monad/monad-bft/mempool.sock); override only if your node
+# writes it elsewhere. The gateway address for each network is baked into the
+# binary; no extra config file to drop in.
 sudo $EDITOR /etc/magma-sidecar/sidecar.env
 
 # Start.
@@ -180,7 +182,7 @@ Environment (optional, every variable maps 1:1 to a CLI flag — CLI > env > def
 
 - `MAGMA_SIDECAR_BIND` — default `127.0.0.1:8089`
 - `MAGMA_MONAD_RPC_URL` — Monad JSON-RPC base URL (target of `/rpc/monad`)
-- `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC
+- `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC (default `/home/monad/monad-bft/mempool.sock`; omit/comment to run ingress-only)
 - `MAGMA_NETWORK` — `mainnet` | `testnet` | `localnet` (omit to disable gateway scoring)
 - `MAGMA_TX_PRIORITY` — fallback hex priority for outbound `EthTxPoolIpcTx` (default `0xffff`, CLI flag `--tx-priority-hex`)
 - `MAGMA_BACKRUN_POOL_TTL_MS` — how long the backrun pairing pool holds a cached target / parked bid (default `2500`, CLI flag `--backrun-pool-ttl-ms`)

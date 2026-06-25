@@ -235,9 +235,10 @@ jobs:
             wget https://github.com/MagmaStaking/magma-sidecar/releases/download/${{ github.ref_name }}/${{ env.PACKAGE_NAME }}_${{ needs.determine-version.outputs.version }}_${ARCH}.deb
             sudo dpkg -i ${{ env.PACKAGE_NAME }}_${{ needs.determine-version.outputs.version }}_${ARCH}.deb
 
-            # At minimum set MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, and
-            # MAGMA_NETWORK (mainnet | testnet | localnet). The gateway address
-            # for each network is baked into the binary — no policy file to drop in.
+            # At minimum set MAGMA_MONAD_RPC_URL and MAGMA_NETWORK
+            # (mainnet | testnet | localnet). MAGMA_TXPOOL_SOCKET defaults to the
+            # standard monad-bft path (/home/monad/monad-bft/mempool.sock). The
+            # gateway address per network is baked into the binary — no policy file.
             sudo vim /etc/magma-sidecar/sidecar.env
             sudo systemctl enable --now magma-sidecar
             sudo systemctl status magma-sidecar

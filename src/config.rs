@@ -47,6 +47,8 @@ pub struct Config {
     /// Optional path to Monad txpool IPC Unix socket (same wire as `monad-eth-txpool-ipc`).
     /// When set, the sidecar subscribes to txpool events and re-injects `EthTxPoolIpcTx`
     /// with a tip-derived priority (see `docs/ARCHITECTURE.md` §"Priority policy").
+    /// Unset = ingress-only (no reprioritization). The `.deb` seeds this to the
+    /// conventional validator path `/home/monad/monad-bft/mempool.sock`.
     #[arg(long, env = "MAGMA_TXPOOL_SOCKET")]
     pub txpool_socket: Option<PathBuf>,
 
