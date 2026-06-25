@@ -12,7 +12,8 @@
   - Tag push matching `v*` (e.g. `v1.0.0`)
   - Manual `workflow_dispatch` (publishes a `0~dev.<sha>` build)
 - Jobs:
-  - `build-and-push-docker` — multi-arch (`linux/amd64`, `linux/arm64`) image to `ghcr.io/magmastaking/magma-sidecar`
+  - `build-docker` — matrix over `amd64` (ubuntu-24.04) and `arm64` (ubuntu-24.04-arm); native (no QEMU) per-arch images pushed by digest
+  - `merge-docker` — stitches the per-arch digests into one multi-arch tag at `ghcr.io/magmastaking/magma-sidecar`
   - `build-deb` — matrix over `amd64` (ubuntu-24.04) and `arm64` (ubuntu-24.04-arm); both native builds
   - `publish-release-and-apt` — only on tag or manual dispatch; attaches `.deb`s to a GitHub Release (tags only) and publishes both arches to the signed S3 APT repo
 
