@@ -8,7 +8,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: hydrogen-labs/magma-sidecar
+  IMAGE_NAME: magmastaking/magma-sidecar
   PACKAGE_NAME: magma-sidecar
 
 jobs:
@@ -172,7 +172,7 @@ jobs:
 
             ```bash
             ARCH=$(dpkg --print-architecture)   # amd64 or arm64
-            wget https://github.com/hydrogen-labs/magma-sidecar/releases/download/${{ github.ref_name }}/${{ env.PACKAGE_NAME }}_${{ needs.determine-version.outputs.version }}_${ARCH}.deb
+            wget https://github.com/MagmaStaking/magma-sidecar/releases/download/${{ github.ref_name }}/${{ env.PACKAGE_NAME }}_${{ needs.determine-version.outputs.version }}_${ARCH}.deb
             sudo dpkg -i ${{ env.PACKAGE_NAME }}_${{ needs.determine-version.outputs.version }}_${ARCH}.deb
 
             # At minimum set MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, and
@@ -189,7 +189,7 @@ jobs:
             - Systemd unit: `magma-sidecar.service`
             - Config: `/etc/magma-sidecar/sidecar.env` (seeded from `sidecar.env.example` on first install)
 
-            Docker image: `ghcr.io/hydrogen-labs/magma-sidecar:${{ needs.determine-version.outputs.version }}`
+            Docker image: `ghcr.io/magmastaking/magma-sidecar:${{ needs.determine-version.outputs.version }}`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

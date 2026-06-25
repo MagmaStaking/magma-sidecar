@@ -5,9 +5,9 @@ Priority: optional
 Architecture: amd64
 Depends: systemd, libc6, ca-certificates
 Maintainer: Hydrogen Labs <ops@hydrogenlabs.xyz>
-Homepage: https://github.com/hydrogen-labs/magma-sidecar
-Vcs-Git: https://github.com/hydrogen-labs/magma-sidecar.git
-Vcs-Browser: https://github.com/hydrogen-labs/magma-sidecar
+Homepage: https://github.com/MagmaStaking/magma-sidecar
+Vcs-Git: https://github.com/MagmaStaking/magma-sidecar.git
+Vcs-Browser: https://github.com/MagmaStaking/magma-sidecar
 Description: Magma Sidecar - tip-based MEV reprioritization for Monad
  Co-located sidecar for a Monad validator. Provides a JSON-RPC ingress
  (`POST /rpc/monad`) that transparently forwards into the Monad EL, and an

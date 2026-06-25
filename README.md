@@ -46,20 +46,20 @@ The Debian package ships:
 
 The `postinst` script seeds `/etc/magma-sidecar/sidecar.env` from the example **only on first install** — upgrades never clobber operator-edited config.
 
-You can also grab a release `.deb` directly from [GitHub Releases](https://github.com/hydrogen-labs/magma-sidecar/releases) (`amd64` + `arm64` are both published) and `sudo dpkg -i magma-sidecar_<version>_<arch>.deb` if you don't want the APT repo.
+You can also grab a release `.deb` directly from [GitHub Releases](https://github.com/MagmaStaking/magma-sidecar/releases) (`amd64` + `arm64` are both published) and `sudo dpkg -i magma-sidecar_<version>_<arch>.deb` if you don't want the APT repo.
 
 ### Option 2: Docker (recommended for non-validator use cases — gateways, dev, k8s)
 
-Multi-arch images at `ghcr.io/hydrogen-labs/magma-sidecar` (`linux/amd64` + `linux/arm64`).
+Multi-arch images at `ghcr.io/magmastaking/magma-sidecar` (`linux/amd64` + `linux/arm64`).
 
 ```bash
-docker pull ghcr.io/hydrogen-labs/magma-sidecar:latest
-# Or pin: ghcr.io/hydrogen-labs/magma-sidecar:1.0.0
+docker pull ghcr.io/magmastaking/magma-sidecar:latest
+# Or pin: ghcr.io/magmastaking/magma-sidecar:1.0.0
 
 # Ingress-only (no txpool IPC reprioritization).
 docker run --rm -p 8089:8089 \
   -e MAGMA_MONAD_RPC_URL=http://host.docker.internal:8545 \
-  ghcr.io/hydrogen-labs/magma-sidecar:latest
+  ghcr.io/magmastaking/magma-sidecar:latest
 ```
 
 For txpool IPC mode, bind-mount the node's socket and a policy file — see the comment block at the top of [`Dockerfile`](Dockerfile) for the full incantation (the AF_UNIX 107-byte path limit comes up here; [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md) §1a has the workaround).

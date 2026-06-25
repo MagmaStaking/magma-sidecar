@@ -44,7 +44,7 @@ Pushing the tag triggers the pipeline, which:
 
 1. Derives the version from the tag.
 2. Builds and pushes the multi-arch Docker image to
-   `ghcr.io/hydrogen-labs/magma-sidecar` (`:X.Y.Z`, `:X.Y`, `:X`, `:latest`).
+   `ghcr.io/magmastaking/magma-sidecar` (`:X.Y.Z`, `:X.Y`, `:X`, `:latest`).
 3. Builds `amd64` + `arm64` `.deb`s on native runners.
 4. Creates the GitHub Release with both `.deb`s attached.
 5. Regenerates and GPG-signs the APT index and syncs it to the S3 repo.
@@ -71,7 +71,7 @@ curl -fsSL https://magma-apt-repo.s3.amazonaws.com/dists/stable/main/binary-amd6
   | grep -A1 '^Package: magma-sidecar'
 
 # Docker image present
-docker manifest inspect ghcr.io/hydrogen-labs/magma-sidecar:X.Y.Z >/dev/null && echo OK
+docker manifest inspect ghcr.io/magmastaking/magma-sidecar:X.Y.Z >/dev/null && echo OK
 ```
 
 Promote progressively: validate on **testnet** (with the testnet gateway baked in)

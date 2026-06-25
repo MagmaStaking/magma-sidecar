@@ -1,6 +1,6 @@
 [Unit]
 Description=Magma Sidecar - tip-based MEV reprioritization for Monad
-Documentation=https://github.com/hydrogen-labs/magma-sidecar
+Documentation=https://github.com/MagmaStaking/magma-sidecar
 After=network.target
 Wants=network.target
 
