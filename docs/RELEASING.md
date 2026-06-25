@@ -1,0 +1,115 @@
+# Releasing magma-sidecar
+
+Maintainer runbook for cutting a release and getting it onto a validator. The
+heavy lifting is automated in [`.github/workflows/build-and-publish.yml`](../.github/workflows/build-and-publish.yml);
+this doc covers the human steps around it.
+
+## Prerequisites (one-time / org-level)
+
+Assumed already in place:
+
+- GitHub secrets: `APT_SIGNING_KEY` (base64 GPG private key), `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`; repo/org vars `S3_APT_BUCKET`, `AWS_REGION` (optional).
+- The APT signing **public** key published at the URL the README references, and the
+  S3 bucket configured for public read with correct content types.
+- `GITHUB_TOKEN` with `packages: write` (provided by Actions) for GHCR.
+
+## Before every release
+
+1. **Bake the gateway address for the target network.** `mainnet`/`testnet` ship as
+   `0x0` placeholders and the startup guard refuses to boot on them. Deploy the
+   `MagmaSearcherGateway`, set its address (and `base_fee_floor_wei` if non-zero) in
+   [`src/policy.rs`](../src/policy.rs), and merge that to `main`. `localnet` is always
+   runnable.
+2. **Land everything on `main`** and confirm CI (`ci.yml`: fmt + clippy + test) is green.
+   `Cargo.lock` must be committed.
+3. **Update [`CHANGELOG.md`](../CHANGELOG.md):** move `Unreleased` items into a new
+   version section with today's date, and fill in the **Compatibility** row — the
+   `monad-bft` IPC `rev` (from `Cargo.toml`) and the Monad node release this build was
+   validated against. Validators use this to avoid pairing mismatched versions.
+4. **Pick the version.** Semantic versioning; while `0.x`, treat every minor as
+   potentially breaking. The CI tag regex accepts **only** `v<major>.<minor>.<patch>`
+   — pre-release suffixes like `-beta.1` are rejected, so use a `0.x` version to signal
+   a beta rather than a suffix.
+
+## Cut the release
+
+```bash
+git checkout main && git pull
+git tag vX.Y.Z          # e.g. v0.1.0 — must match v<major>.<minor>.<patch> exactly
+git push origin vX.Y.Z
+```
+
+Pushing the tag triggers the pipeline, which:
+
+1. Derives the version from the tag.
+2. Builds and pushes the multi-arch Docker image to
+   `ghcr.io/hydrogen-labs/magma-sidecar` (`:X.Y.Z`, `:X.Y`, `:X`, `:latest`).
+3. Builds `amd64` + `arm64` `.deb`s on native runners.
+4. Creates the GitHub Release with both `.deb`s attached.
+5. Regenerates and GPG-signs the APT index and syncs it to the S3 repo.
+
+### Staging / dry run
+
+A manual **workflow_dispatch** run (no tag) publishes a `0~dev.<sha>` package to the
+APT repo **without** cutting a GitHub Release — use it to smoke-test the pipeline
+before committing to a real tag:
+
+```bash
+gh workflow run build-and-publish.yml --ref main
+```
+
+## Verify
+
+```bash
+# GitHub release + attached .debs
+gh release view vX.Y.Z
+
+# APT metadata refreshed and signed
+curl -fsSL https://magma-apt-repo.s3.amazonaws.com/dists/stable/InRelease | head
+curl -fsSL https://magma-apt-repo.s3.amazonaws.com/dists/stable/main/binary-amd64/Packages \
+  | grep -A1 '^Package: magma-sidecar'
+
+# Docker image present
+docker manifest inspect ghcr.io/hydrogen-labs/magma-sidecar:X.Y.Z >/dev/null && echo OK
+```
+
+Promote progressively: validate on **testnet** (with the testnet gateway baked in)
+before tagging a mainnet-targeted release.
+
+## Install on a validator
+
+The `monad` user already exists (created by the node package); the node's txpool
+socket lives under `/home/monad/...`, which the hardened unit can reach.
+
+```bash
+sudo apt update
+sudo apt install magma-sidecar=X.Y.Z        # pin the version explicitly
+# or, from the GitHub Release:
+#   sudo dpkg -i magma-sidecar_X.Y.Z_amd64.deb
+
+sudo vim /etc/magma-sidecar/sidecar.env     # MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, MAGMA_NETWORK
+sudo systemctl enable --now magma-sidecar
+sudo systemctl status magma-sidecar
+journalctl -u magma-sidecar -f              # "loaded tip policy network=..." then "connected to Monad txpool IPC"
+curl -s http://127.0.0.1:8089/health | jq   # ipc_state: "connected"
+```
+
+`postinst` seeds `sidecar.env` only on first install, so upgrades never clobber
+operator config.
+
+## Upgrade / rollback
+
+- **Upgrade:** `sudo apt update && sudo apt install magma-sidecar=X.Y.Z` — `prerm`
+  stops the unit, `postinst` `try-restart`s it, config is preserved.
+- **Rollback:** `sudo apt install magma-sidecar=<previous> && sudo systemctl restart magma-sidecar`
+  (or `dpkg -i` the older release `.deb`). Because the gateway address is baked per
+  binary, rolling back also reverts the gateway — fine unless a gateway redeploy
+  happened in between, in which case roll the address *forward* in a new patch release
+  instead of rolling the binary back.
+
+## Post-release
+
+- Confirm a clean-box `apt update && apt install magma-sidecar=X.Y.Z` works on both
+  `amd64` and `arm64`.
+- Open a fresh `## [Unreleased]` section in `CHANGELOG.md`.
