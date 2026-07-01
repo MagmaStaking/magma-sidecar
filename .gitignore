@@ -23,3 +23,9 @@ Thumbs.db
 
 # Debug / logs
 *.log
+
+# APT_REPO_SETUP.md
+APT_REPO_SETUP.md
+
+# APT_REPO_SETUP.md
+bootstrap-apt-repo.sh

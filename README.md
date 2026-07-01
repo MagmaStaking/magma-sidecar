@@ -18,8 +18,8 @@ Hosts a versioned `.deb` with a systemd unit, dropped under `monad:monad` so it 
 ```bash
 # Add the Magma APT repo and signing key (one-time).
 sudo mkdir -p /etc/apt/keyrings
-sudo wget -qO /etc/apt/keyrings/magma.gpg https://magma-apt-repo.s3.amazonaws.com/magma-apt-key.gpg.bin
-echo "deb [signed-by=/etc/apt/keyrings/magma.gpg] https://magma-apt-repo.s3.amazonaws.com stable main" \
+sudo wget -qO /etc/apt/keyrings/magma.gpg https://magmastaking.github.io/magma-sidecar-apt-repo/magma-apt-key.gpg.bin
+echo "deb [signed-by=/etc/apt/keyrings/magma.gpg] https://magmastaking.github.io/magma-sidecar-apt-repo stable main" \
   | sudo tee /etc/apt/sources.list.d/magma.list
 sudo apt update
 
