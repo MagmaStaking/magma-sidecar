@@ -235,9 +235,10 @@ jobs:
             wget https://github.com/MagmaStaking/magma-sidecar/releases/download/${{ github.ref_name }}/${{ env.PACKAGE_NAME }}_${{ needs.determine-version.outputs.version }}_${ARCH}.deb
             sudo dpkg -i ${{ env.PACKAGE_NAME }}_${{ needs.determine-version.outputs.version }}_${ARCH}.deb
 
-            # At minimum set MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, and
-            # MAGMA_NETWORK (mainnet | testnet | localnet). The gateway address
-            # for each network is baked into the binary — no policy file to drop in.
+            # At minimum set MAGMA_MONAD_RPC_URL and MAGMA_NETWORK
+            # (mainnet | testnet | localnet). MAGMA_TXPOOL_SOCKET defaults to the
+            # standard monad-bft path (/home/monad/monad-bft/mempool.sock). The
+            # gateway address per network is baked into the binary — no policy file.
             sudo vim /etc/magma-sidecar/sidecar.env
             sudo systemctl enable --now magma-sidecar
             sudo systemctl status magma-sidecar
@@ -253,16 +254,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION || 'eu-central-1' }}
-
-      - name: Publish to S3 APT repository
+      - name: Publish to GitHub Pages APT repository
         env:
-          S3_BUCKET: ${{ vars.S3_APT_BUCKET || 'magma-apt-repo' }}
+          # The Pages-hosted APT repo (the pool store + served site).
+          APT_REPO: ${{ vars.APT_REPO || 'MagmaStaking/magma-sidecar-apt-repo' }}
+          # Fine-grained PAT with Contents:write on that repo (cross-repo push;
+          # the built-in GITHUB_TOKEN can't reach another repository, and the
+          # org has SSH deploy keys disabled).
+          APT_REPO_TOKEN: ${{ secrets.APT_REPO_TOKEN }}
           APT_SIGNING_KEY_B64: ${{ secrets.APT_SIGNING_KEY }}
           PACKAGE: ${{ env.PACKAGE_NAME }}
         run: ./scripts/publish-apt.sh artifacts/*.deb

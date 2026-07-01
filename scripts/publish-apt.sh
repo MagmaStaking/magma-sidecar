@@ -1,17 +1,39 @@
 #!/usr/bin/env bash
 #
-# Publish .deb files to the Magma S3 APT repository.
+# Publish .deb files to the Magma APT repository hosted on GitHub Pages.
+#
+# The repo `MagmaStaking/magma-sidecar-apt-repo` is BOTH the pool store and the
+# published site: GitHub Pages serves it (Settings -> Pages -> "Deploy from a
+# branch" = `main` / root) at https://magmastaking.github.io/magma-sidecar-apt-repo.
+# Publishing = clone it (read-only, to hydrate the pool), drop the new .deb into
+# pool/, regenerate + GPG-sign the index, then commit the changed files back via
+# the GitHub GraphQL API. Pages redeploys automatically.
+#
+# Why GraphQL createCommitOnBranch (not `git push`, not the Git Data REST API):
+# the org enforces a "require signed commits" ruleset on every branch. Only
+# GitHub App/Actions tokens get auto-signed on `git push`/REST; a PAT does not.
+# The GraphQL `createCommitOnBranch` mutation, however, is signed by GitHub for
+# ANY token (incl. a fine-grained PAT), so its commits land as *Verified* and
+# satisfy the ruleset. Uses APT_REPO_TOKEN (Contents:write); the built-in
+# GITHUB_TOKEN can't reach another repo and the org disables SSH deploy keys.
+#
+# Note: createCommitOnBranch inlines file contents (base64) in the request, so
+# very large .deb files could bump GraphQL payload limits. We commit the pool
+# (debs) separately from the small index files to keep each request bounded.
 #
 # Used by .github/workflows/build-and-publish.yml on tag pushes and manual
-# dispatch. Safe to run locally for a smoke test as long as you have the AWS
-# creds and the signing key on disk (will skip GPG signing if no key is set).
+# dispatch. Safe to run locally: set PUSH=0 to build + sign the tree without
+# committing (still needs APT_REPO_TOKEN for the initial read-only clone).
 #
 # Usage:
-#   S3_BUCKET=magma-apt-repo                \
-#   APT_SIGNING_KEY_B64="$(...)"            \
+#   APT_REPO=MagmaStaking/magma-sidecar-apt-repo \
+#   APT_REPO_TOKEN="github_pat_..."              \
+#   APT_SIGNING_KEY_B64="$(...)"                 # optional locally, required in CI \
 #   scripts/publish-apt.sh path/to/*.deb
 #
-# Layout in S3:
+# Layout in the repo (repo root == Pages site root):
+#   .nojekyll                                   (disables Jekyll; seeded once)
+#   magma-apt-key.gpg.bin                        (public signing key; seeded once)
 #   pool/main/m/magma-sidecar/<deb-files>
 #   dists/stable/main/binary-<arch>/Packages{,.gz}
 #   dists/stable/Release
@@ -25,31 +47,87 @@ if [ $# -lt 1 ]; then
     exit 2
 fi
 
-: "${S3_BUCKET:?S3_BUCKET is required}"
+: "${APT_REPO:?APT_REPO is required (e.g. MagmaStaking/magma-sidecar-apt-repo)}"
+: "${APT_REPO_TOKEN:?APT_REPO_TOKEN is required (fine-grained PAT, Contents:write)}"
 SUITE="${SUITE:-stable}"
 COMPONENT="${COMPONENT:-main}"
 ARCHES="${ARCHES:-amd64 arm64}"
 PACKAGE="${PACKAGE:-magma-sidecar}"
+BRANCH="${APT_REPO_BRANCH:-main}"
+
+# gh reads GH_TOKEN for API/GraphQL calls; the PAT is what signs (via the
+# createCommitOnBranch mutation) and what the clone below authenticates with.
+export GH_TOKEN="${APT_REPO_TOKEN}"
+
+# Create one GitHub-signed (Verified) commit adding/updating the given files.
+#   gql_commit <owner/repo> <branch> <expected-head-oid> <headline> <root> <path...>
+# Echoes the new commit oid on success.
+gql_commit() {
+    local repo="$1" branch="$2" oid="$3" headline="$4" root="$5"; shift 5
+    local paths=("$@") adds=() p b64 joined body errf newoid
+
+    for p in "${paths[@]}"; do
+        b64="$(base64 < "${root}/${p}" | tr -d '\n')"
+        adds+=("{\"path\":\"${p}\",\"contents\":\"${b64}\"}")
+    done
+    joined="$(IFS=,; printf '%s' "${adds[*]}")"
+
+    body="$(mktemp)"; errf="$(mktemp)"
+    {
+        printf '{"query":"mutation($input: CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{oid}}}",'
+        printf '"variables":{"input":{'
+        printf '"branch":{"repositoryNameWithOwner":"%s","branchName":"%s"},' "${repo}" "${branch}"
+        printf '"message":{"headline":"%s"},' "${headline}"
+        printf '"fileChanges":{"additions":[%s]},' "${joined}"
+        printf '"expectedHeadOid":"%s"}}}' "${oid}"
+    } > "${body}"
+
+    newoid="$(gh api graphql --input "${body}" --jq '.data.createCommitOnBranch.commit.oid' 2>"${errf}" || true)"
+    if [ -z "${newoid}" ] || [ "${newoid}" = "null" ]; then
+        echo "error: createCommitOnBranch failed:" >&2
+        cat "${errf}" >&2
+        rm -f "${body}" "${errf}"
+        return 1
+    fi
+    rm -f "${body}" "${errf}"
+    printf '%s' "${newoid}"
+}
+
+# Resolve .deb paths to absolute BEFORE we cd into the clone.
+DEBS=()
+for f in "$@"; do
+    if [ -f "$f" ]; then
+        DEBS+=("$(readlink -f "$f")")
+    else
+        echo "warn: '$f' not found, skipping" >&2
+    fi
+done
+[ "${#DEBS[@]}" -gt 0 ] || { echo "error: no .deb files found among args" >&2; exit 1; }
+
 WORKDIR="$(mktemp -d -t magma-apt-XXXXXX)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 
+# ----- HTTPS auth for the read-only clone (token kept out of URLs/logs) ----
+REMOTE="https://github.com/${APT_REPO}.git"
+AUTH_B64="$(printf 'x-access-token:%s' "${APT_REPO_TOKEN}" | base64 | tr -d '\n')"
+GIT_AUTH=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH_B64}")
+
+# ----- Clone the pool store (this replaces the old `aws s3 sync` hydrate) --
+REPO_DIR="${WORKDIR}/repo"
+echo "Cloning ${APT_REPO} (branch ${BRANCH}) ..."
+git "${GIT_AUTH[@]}" clone --depth 1 --branch "${BRANCH}" "${REMOTE}" "${REPO_DIR}"
+cd "${REPO_DIR}"
+
+# Belt-and-suspenders: make sure Jekyll stays disabled so files/dirs are served
+# verbatim (Jekyll would drop entries and mangle metadata).
+[ -f .nojekyll ] || touch .nojekyll
+
 POOL_REL="pool/${COMPONENT}/$(printf '%s' "${PACKAGE}" | cut -c1)/${PACKAGE}"
-echo "Staging in ${WORKDIR}"
 echo "Pool path: ${POOL_REL}"
-
-mkdir -p "${WORKDIR}/${POOL_REL}"
-for f in "$@"; do
-    [ -f "$f" ] || { echo "warn: '$f' not found, skipping" >&2; continue; }
-    install -m 0644 "$f" "${WORKDIR}/${POOL_REL}/"
+mkdir -p "${POOL_REL}"
+for f in "${DEBS[@]}"; do
+    install -m 0644 "$f" "${POOL_REL}/"
 done
-
-# Hydrate from S3 so the new index includes every previously published
-# version. First publish is a no-op (sync just creates pool/).
-echo "Hydrating existing pool from s3://${S3_BUCKET}/pool/ ..."
-aws s3 sync "s3://${S3_BUCKET}/pool/" "${WORKDIR}/pool/" --no-progress \
-    --exclude "*" --include "*.deb" || true
-
-cd "${WORKDIR}"
 
 # apt-ftparchive does the heavy lifting (Packages with size+hashes per entry)
 # instead of hand-rolling md5/sha1/sha256 loops.
@@ -92,31 +170,48 @@ else
     echo "warn: APT_SIGNING_KEY_B64 not set; skipping GPG signing" >&2
 fi
 
-echo ""
-echo "Uploading to s3://${S3_BUCKET}/ ..."
-aws s3 sync "pool/" "s3://${S3_BUCKET}/pool/" \
-    --content-type "application/vnd.debian.binary-package" \
-    --exclude "*" --include "*.deb"
+# ----- Commit changed files via GraphQL (Verified) ------------------------
+# Collect what changed vs the cloned HEAD (added + modified; we never delete),
+# then split pool (debs) from index files so each GraphQL request stays small
+# and the deb is always committed before the index that references it.
+CHANGED=()
+while IFS= read -r line; do
+    [ -n "$line" ] && CHANGED+=("$line")
+done < <(git -c core.quotepath=false status --porcelain=v1 --untracked-files=all | cut -c4-)
 
-for arch in ${ARCHES}; do
-    bin_dir="dists/${SUITE}/${COMPONENT}/binary-${arch}"
-    aws s3 cp "${bin_dir}/Packages"    \
-        "s3://${S3_BUCKET}/${bin_dir}/Packages"    --content-type "text/plain"
-    aws s3 cp "${bin_dir}/Packages.gz" \
-        "s3://${S3_BUCKET}/${bin_dir}/Packages.gz" --content-type "application/gzip"
+if [ "${#CHANGED[@]}" -eq 0 ]; then
+    echo "No changes to publish (identical index already present)."
+    exit 0
+fi
+
+if [ "${PUSH:-1}" != "1" ]; then
+    echo "PUSH=0 set; skipping commit. ${#CHANGED[@]} file(s) staged in ${REPO_DIR}"
+    printf '  %s\n' "${CHANGED[@]}"
+    exit 0
+fi
+
+POOL_FILES=(); META_FILES=()
+for p in "${CHANGED[@]}"; do
+    case "$p" in
+        pool/*) POOL_FILES+=("$p") ;;
+        *)      META_FILES+=("$p") ;;
+    esac
 done
 
-aws s3 cp "dists/${SUITE}/Release" \
-    "s3://${S3_BUCKET}/dists/${SUITE}/Release" --content-type "text/plain"
-if [ -f "dists/${SUITE}/InRelease" ]; then
-    aws s3 cp "dists/${SUITE}/InRelease" \
-        "s3://${S3_BUCKET}/dists/${SUITE}/InRelease" --content-type "text/plain"
+STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+HEAD_OID="$(git rev-parse HEAD)"
+
+if [ "${#POOL_FILES[@]}" -gt 0 ]; then
+    echo "Committing ${#POOL_FILES[@]} pool file(s) via GraphQL (Verified) ..."
+    HEAD_OID="$(gql_commit "${APT_REPO}" "${BRANCH}" "${HEAD_OID}" \
+        "Publish ${PACKAGE} pool ${STAMP}" "${REPO_DIR}" "${POOL_FILES[@]}")"
 fi
-if [ -f "dists/${SUITE}/Release.gpg" ]; then
-    aws s3 cp "dists/${SUITE}/Release.gpg" \
-        "s3://${S3_BUCKET}/dists/${SUITE}/Release.gpg" \
-        --content-type "application/pgp-signature"
+if [ "${#META_FILES[@]}" -gt 0 ]; then
+    echo "Committing ${#META_FILES[@]} index file(s) via GraphQL (Verified) ..."
+    HEAD_OID="$(gql_commit "${APT_REPO}" "${BRANCH}" "${HEAD_OID}" \
+        "Publish ${PACKAGE} index ${STAMP}" "${REPO_DIR}" "${META_FILES[@]}")"
 fi
 
 echo ""
-echo "Published. Repo URL: https://${S3_BUCKET}.s3.amazonaws.com"
+echo "Published. HEAD now ${HEAD_OID}"
+echo "Repo URL: https://magmastaking.github.io/magma-sidecar-apt-repo"

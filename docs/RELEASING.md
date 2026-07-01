@@ -6,12 +6,16 @@ this doc covers the human steps around it.
 
 ## Prerequisites (one-time / org-level)
 
+If the APT repo has never been stood up, do [`APT_REPO_SETUP.md`](APT_REPO_SETUP.md)
+first — it's the unambiguous, step-by-step bootstrap for everything below.
+
 Assumed already in place:
 
-- GitHub secrets: `APT_SIGNING_KEY` (base64 GPG private key), `AWS_ACCESS_KEY_ID`,
-  `AWS_SECRET_ACCESS_KEY`; repo/org vars `S3_APT_BUCKET`, `AWS_REGION` (optional).
-- The APT signing **public** key published at the URL the README references, and the
-  S3 bucket configured for public read with correct content types.
+- GitHub secrets: `APT_SIGNING_KEY` (base64 GPG private key), `APT_REPO_TOKEN`
+  (fine-grained PAT with Contents:write on the APT repo); repo var `APT_REPO`
+  (optional; defaults to `MagmaStaking/magma-sidecar-apt-repo`).
+- The APT repo (`MagmaStaking/magma-sidecar-apt-repo`) seeded with the signing
+  **public** key and served by GitHub Pages (once public).
 - `GITHUB_TOKEN` with `packages: write` (provided by Actions) for GHCR.
 
 ## Before every release
@@ -47,7 +51,7 @@ Pushing the tag triggers the pipeline, which:
    `ghcr.io/magmastaking/magma-sidecar` (`:X.Y.Z`, `:X.Y`, `:X`, `:latest`).
 3. Builds `amd64` + `arm64` `.deb`s on native runners.
 4. Creates the GitHub Release with both `.deb`s attached.
-5. Regenerates and GPG-signs the APT index and syncs it to the S3 repo.
+5. Regenerates and GPG-signs the APT index and pushes it to the GitHub Pages APT repo.
 
 ### Staging / dry run
 
@@ -65,9 +69,9 @@ gh workflow run build-and-publish.yml --ref main
 # GitHub release + attached .debs
 gh release view vX.Y.Z
 
-# APT metadata refreshed and signed
-curl -fsSL https://magma-apt-repo.s3.amazonaws.com/dists/stable/InRelease | head
-curl -fsSL https://magma-apt-repo.s3.amazonaws.com/dists/stable/main/binary-amd64/Packages \
+# APT metadata refreshed and signed (public Pages URL)
+curl -fsSL https://magmastaking.github.io/magma-sidecar-apt-repo/dists/stable/InRelease | head
+curl -fsSL https://magmastaking.github.io/magma-sidecar-apt-repo/dists/stable/main/binary-amd64/Packages \
   | grep -A1 '^Package: magma-sidecar'
 
 # Docker image present
