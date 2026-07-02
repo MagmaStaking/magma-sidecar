@@ -1,9 +1,10 @@
 # magma-sidecar
 
-Rust **sidecar** for a Monad validator. It does two things, both described in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md):
+Rust **sidecar** for a Monad validator. It does one thing, described in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md):
 
-1. **HTTP ingress** for searchers — `POST /rpc/monad` transparently forwards JSON-RPC (e.g. `eth_sendRawTransaction`) into the Monad EL.
-2. **Txpool IPC reprioritization** — connects to the node's txpool Unix socket, observes `EthTxPoolEvent`s, and re-injects each transaction with a **tip-derived priority** so the node orders MEV-relevant traffic ahead of vanilla traffic.
+- **Txpool IPC reprioritization** — connects to the node's txpool Unix socket, observes `EthTxPoolEvent`s, and re-injects each MEV-relevant transaction with a **tip-derived priority** so the node orders it ahead of vanilla traffic.
+
+Searchers submit transactions to the Monad node's JSON-RPC as usual; the sidecar does **not** provide a transaction ingress of its own. It reprioritizes what it sees on the txpool rather than opening a second lane for txs to land. It also exposes an observability-only HTTP server (`/health`, `/metrics`) — no transactions flow through it.
 
 This repo is intentionally **separate** from `monad-bft` (its own Cargo project, not a workspace member of the node repo). It pulls `monad-eth-txpool-ipc` and `monad-eth-txpool-types` straight from the upstream **`category-labs/monad-bft`** repo, pinned to a specific commit in `Cargo.toml`.
 
@@ -27,7 +28,7 @@ sudo apt update
 sudo apt install magma-sidecar
 # Or a specific version:  sudo apt install magma-sidecar=1.0.0
 
-# Configure: at minimum set MAGMA_MONAD_RPC_URL and MAGMA_NETWORK
+# Configure: at minimum set MAGMA_NETWORK
 # (mainnet | testnet | localnet). MAGMA_TXPOOL_SOCKET defaults to the standard
 # monad-bft path (/home/monad/monad-bft/mempool.sock); override only if your node
 # writes it elsewhere. The gateway address for each network is baked into the
@@ -50,7 +51,7 @@ The `postinst` script seeds `/etc/magma-sidecar/sidecar.env` from the example **
 
 You can also grab a release `.deb` directly from [GitHub Releases](https://github.com/MagmaStaking/magma-sidecar/releases) (`amd64` + `arm64` are both published) and `sudo dpkg -i magma-sidecar_<version>_<arch>.deb` if you don't want the APT repo.
 
-### Option 2: Docker (recommended for non-validator use cases — gateways, dev, k8s)
+### Option 2: Docker (dev, k8s)
 
 Multi-arch images at `ghcr.io/magmastaking/magma-sidecar` (`linux/amd64` + `linux/arm64`).
 
@@ -58,13 +59,15 @@ Multi-arch images at `ghcr.io/magmastaking/magma-sidecar` (`linux/amd64` + `linu
 docker pull ghcr.io/magmastaking/magma-sidecar:latest
 # Or pin: ghcr.io/magmastaking/magma-sidecar:1.0.0
 
-# Ingress-only (no txpool IPC reprioritization).
+# Reprioritize a node's txpool: bind-mount the node's IPC socket and pick the network.
 docker run --rm -p 8089:8089 \
-  -e MAGMA_MONAD_RPC_URL=http://host.docker.internal:8545 \
+  -v /run/monad:/run/monad:ro \
+  -e MAGMA_TXPOOL_SOCKET=/run/monad/mempool.sock \
+  -e MAGMA_NETWORK=localnet \
   ghcr.io/magmastaking/magma-sidecar:latest
 ```
 
-For txpool IPC mode, bind-mount the node's socket and a policy file — see the comment block at the top of [`Dockerfile`](Dockerfile) for the full incantation (the AF_UNIX 107-byte path limit comes up here; [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md) §1a has the workaround).
+See the comment block at the top of [`Dockerfile`](Dockerfile) for the full incantation (the AF_UNIX 107-byte path limit comes up here; [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md) §1a has the workaround). Without `MAGMA_TXPOOL_SOCKET` the container just serves `/health` and `/metrics` and does no reprioritization.
 
 ### Option 3: Build from source
 
@@ -132,30 +135,24 @@ sudo systemctl edit magma-sidecar
 |---------|---------|
 | `GET /health` | Structured liveness: IPC state, counters, last-event/last-send timestamps |
 | `GET /metrics` | Prometheus exposition (counters, gauges; namespaced `magma_sidecar_*`) |
-| `POST /rpc/monad` | Forward JSON-RPC body to the Monad EL (`eth_sendRawTransaction`, `eth_chainId`, …) |
 | **Txpool IPC** (optional) | `--txpool-socket` connects to the node's txpool Unix socket, consumes `EthTxPoolEvent` batches, and (in policy mode) re-injects only `Insert`s targeting an allowlisted `MagmaSearcherGateway` as `EthTxPoolIpcTx` with a tip-based priority. |
 
 ## Run
+
+Reprioritization requires a txpool socket. Run **with txpool IPC + tip policy** (same socket the node exposes for `EthTxPoolIpcClient`):
 
 ```bash
 cd magma-sidecar
 cargo run --release -- \
   --bind 0.0.0.0:8089 \
-  --monad-rpc-url http://127.0.0.1:8545
-```
-
-**With txpool IPC + tip policy** (same socket the node exposes for `EthTxPoolIpcClient`):
-
-```bash
-cargo run --release -- \
-  --bind 0.0.0.0:8089 \
-  --monad-rpc-url http://127.0.0.1:8545 \
   --txpool-socket /path/to/mempool.sock \
   --network localnet \
   --tx-priority-hex 0xffff
 ```
 
-In policy mode the sidecar **only reinjects** transactions whose `to` is the network's allowlisted `MagmaSearcherGateway` — vanilla traffic is observed (so `tx_inserts_observed` still climbs) but left alone, so the node's default ordering applies and the sidecar doesn't fight other reprioritizers (e.g. `fastlane-sidecar`) for unrelated txs. Skipped txs are counted in `txpool_skipped_non_gateway_total`.
+Without `--txpool-socket` the sidecar just serves `/health` and `/metrics` and does no reprioritization.
+
+In policy mode the sidecar **only reinjects** transactions whose `to` is the network's allowlisted `MagmaSearcherGateway` — vanilla traffic is observed (so `tx_inserts_observed` still climbs) but left alone, so the node's default ordering applies and the sidecar doesn't fight other reprioritizers for unrelated txs. Skipped txs are counted in `txpool_skipped_non_gateway_total`.
 
 Bids that carry a non-zero `targetTxHash` are treated as **backruns**: the sidecar pairs them with their target tx and reinjects both so the bid lands immediately behind the target (rather than being ranked absolutely, which a large bid would otherwise win). Pairing works regardless of which tx the node sees first and is bounded by `--backrun-pool-ttl-ms` / `--backrun-pool-max`; see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §"Backrun pairing". Pairing activity is exposed via the `backrun_*` metrics and `/health`.
 
@@ -167,8 +164,8 @@ There is exactly one `MagmaSearcherGateway` per network. The address is baked in
 
 | `--network` | Gateway address | Notes |
 |---|---|---|
-| `mainnet` | (TODO: real address) | placeholder until the mainnet gateway is deployed |
-| `testnet` | (TODO: real address) | placeholder until the testnet gateway is deployed |
+| `mainnet` | `0xe0232Cf5ee0c6d79118498c29a267D80881011C5` | `MagmaSearcherGateway` proxy on Monad mainnet (chain id 143) |
+| `testnet` | `0x21615eDffD849eEd1C08e780032Da3bCd1003CD3` | `MagmaSearcherGateway` proxy on Monad testnet (chain id 10143) |
 | `localnet` | `0x8f86403a4de0bb5791fa46b8e795c547942fe4cf` | deterministic deployment from `mev-entrypoint/test-scripts/make deploy` against the local Monad devnet |
 
 The score is `priority_fee × gas_limit + bid`, where the bid is:
@@ -180,9 +177,8 @@ See `docs/ARCHITECTURE.md` §"Priority policy" and `src/policy.rs` for the preci
 
 Environment (optional, every variable maps 1:1 to a CLI flag — CLI > env > default):
 
-- `MAGMA_SIDECAR_BIND` — default `127.0.0.1:8089`
-- `MAGMA_MONAD_RPC_URL` — Monad JSON-RPC base URL (target of `/rpc/monad`)
-- `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC (default `/home/monad/monad-bft/mempool.sock`; omit/comment to run ingress-only)
+- `MAGMA_SIDECAR_BIND` — default `127.0.0.1:8089` (observability HTTP: `/health`, `/metrics`)
+- `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC (default `/home/monad/monad-bft/mempool.sock`; omit/comment to disable reprioritization)
 - `MAGMA_NETWORK` — `mainnet` | `testnet` | `localnet` (omit to disable gateway scoring)
 - `MAGMA_TX_PRIORITY` — fallback hex priority for outbound `EthTxPoolIpcTx` (default `0xffff`, CLI flag `--tx-priority-hex`)
 - `MAGMA_BACKRUN_POOL_TTL_MS` — how long the backrun pairing pool holds a cached target / parked bid (default `2500`, CLI flag `--backrun-pool-ttl-ms`)
@@ -191,14 +187,11 @@ Environment (optional, every variable maps 1:1 to a CLI flag — CLI > env > def
 
 For local dev, copy `.env.example` to `.env.local` (gitignored), edit anything host-specific, then `set -a; source .env.local; set +a; cargo run --release` — see [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md) §2 for the full flow.
 
-### Example: forward a raw tx via the sidecar
-
-Point your client at the sidecar instead of the node directly:
+### Check liveness
 
 ```bash
-curl -s http://127.0.0.1:8089/rpc/monad \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"eth_sendRawTransaction","params":["0x..."],"id":1}'
+curl -s http://127.0.0.1:8089/health | jq
+# {"status":"ok","ipc_state":"connected","tx_inserts_observed":N,"tx_prioritized":N,...}
 ```
 
 ## Related repos

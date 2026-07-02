@@ -20,11 +20,12 @@ Assumed already in place:
 
 ## Before every release
 
-1. **Bake the gateway address for the target network.** `mainnet`/`testnet` ship as
-   `0x0` placeholders and the startup guard refuses to boot on them. Deploy the
-   `MagmaSearcherGateway`, set its address (and `base_fee_floor_wei` if non-zero) in
-   [`src/policy.rs`](../src/policy.rs), and merge that to `main`. `localnet` is always
-   runnable.
+1. **Bake the gateway address for the target network.** `mainnet`, `testnet`, and
+   `localnet` all have their `MagmaSearcherGateway` address baked into
+   [`src/policy.rs`](../src/policy.rs) today. If a gateway is redeployed (or a new
+   network is added — it starts as a `0x0` placeholder that the startup guard refuses
+   to boot on), update its address (and `base_fee_floor_wei` if non-zero) there and
+   merge to `main` before releasing.
 2. **Land everything on `main`** and confirm CI (`ci.yml`: fmt + clippy + test) is green.
    `Cargo.lock` must be committed.
 3. **Update [`CHANGELOG.md`](../CHANGELOG.md):** move `Unreleased` items into a new
@@ -92,7 +93,7 @@ sudo apt install magma-sidecar=X.Y.Z        # pin the version explicitly
 # or, from the GitHub Release:
 #   sudo dpkg -i magma-sidecar_X.Y.Z_amd64.deb
 
-sudo vim /etc/magma-sidecar/sidecar.env     # MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, MAGMA_NETWORK
+sudo vim /etc/magma-sidecar/sidecar.env     # MAGMA_TXPOOL_SOCKET, MAGMA_NETWORK
 sudo systemctl enable --now magma-sidecar
 sudo systemctl status magma-sidecar
 journalctl -u magma-sidecar -f              # "loaded tip policy network=..." then "connected to Monad txpool IPC"
@@ -101,6 +102,43 @@ curl -s http://127.0.0.1:8089/health | jq   # ipc_state: "connected"
 
 `postinst` seeds `sidecar.env` only on first install, so upgrades never clobber
 operator config.
+
+### Resource limits & CPU pinning
+
+The shipped unit ([`debian/sidecar/magma-sidecar.service`](../debian/sidecar/magma-sidecar.service))
+applies cgroup v2 caps so a runaway or compromised sidecar can't starve the
+node: `MemoryHigh`/`MemoryMax` (soft throttle then hard OOM ceiling), `TasksMax`,
+`CPUWeight` + `CPUQuota` (yields under contention, capped at one core),
+`IOWeight`, and `LimitNOFILE`. It also **pins to cores 12-15** (`AllowedCPUs`/
+`CPUAffinity`) — the RPC cores — to keep the reprioritizer off the node's
+consensus cores (8-11), where scheduler jitter would matter most; the RPC path
+is far less latency-critical, so co-locating there is cheap. The memory/task
+caps are conservative starting points, not measured — validate and retune:
+
+```bash
+systemctl status magma-sidecar     # reports memory peak
+systemd-cgtop                       # live CPU/mem/IO per service
+```
+
+If a host's core layout differs from the standard 8-11 (consensus) / 12-15 (RPC)
+split, override the pinning (or any cap) via a **drop-in** rather than editing
+the packaged unit — drop-ins survive `apt upgrade`:
+
+```bash
+# See which cores are already claimed so you can pick a non-consensus set:
+systemctl show monad-bft -p AllowedCPUs -p CPUAffinity   # node (consensus)
+systemctl show monad-rpc -p AllowedCPUs -p CPUAffinity   # RPC
+
+sudo systemctl edit magma-sidecar
+# In the editor:
+#   [Service]
+#   AllowedCPUs=<non-consensus cores>
+#   CPUAffinity=<non-consensus cores>
+#   # Or raise the memory ceiling on a busy host:
+#   MemoryMax=1G
+sudo systemctl daemon-reload && sudo systemctl restart magma-sidecar
+systemctl show magma-sidecar -p MemoryMax -p CPUQuotaPerSecUSec -p AllowedCPUs -p TasksMax
+```
 
 ## Upgrade / rollback
 

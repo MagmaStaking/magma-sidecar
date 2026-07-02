@@ -1,13 +1,13 @@
 # Local development: Monad single node + magma-sidecar + Magma gateway
 
-This guide wires together a **local Monad devnet** (single-node Docker stack), the **magma-sidecar** (HTTP ingress + txpool IPC reprioritization), and the **Magma searcher gateway** plus counter test contracts from **`mev-entrypoint`**. When everything is up, you can run the **counter-conflict** flow to exercise competing tip-bearing transactions and verify that the sidecar orders them by tip.
+This guide wires together a **local Monad devnet** (single-node Docker stack), the **magma-sidecar** (txpool IPC reprioritization), and the **Magma searcher gateway** plus counter test contracts from **`mev-entrypoint`**. When everything is up, you can run the **counter-conflict** flow to exercise competing tip-bearing transactions and verify that the sidecar orders them by tip.
 
 Paths below use these repo roots (adjust to your clone locations):
 
 | Repo | Role |
 |------|------|
 | `monad-bft` | Consensus + execution + `monad-rpc` (HTTP) + txpool IPC socket |
-| `magma-sidecar` (this repo) | HTTP ingress (`/rpc/monad`) + txpool IPC reprioritization |
+| `magma-sidecar` (this repo) | Txpool IPC reprioritization (+ `/health`, `/metrics`) |
 | `mev-entrypoint` | Solidity gateway/searchers; **`test-scripts/`** = Magma gateway + counter-conflict scenario |
 
 ## Architecture
@@ -25,15 +25,13 @@ flowchart LR
     MR --> SOCK
   end
 
-  SC["magma-sidecar :8089\n(HTTP + IPC)"]
-  MR -->|"forwarded JSON-RPC"| SC
-  SC -->|"eth_sendRawTransaction"| MR
+  SC["magma-sidecar :8089\n(IPC + /health, /metrics)"]
   SOCK <-->|"EthTxPoolEvent / EthTxPoolIpcTx"| SC
 
   GW[On-chain tests\nMagmaSearcherGateway + counter]
   MR -->|"forge / cast deploy"| GW
   TS[Conflict test driver]
-  TS -->|"eth_sendRawTransaction"| SC
+  TS -->|"eth_sendRawTransaction"| MR
   TS -->|"cast call"| MR
 ```
 
@@ -43,7 +41,7 @@ flowchart LR
 |------|---------|
 | 8080 | Monad JSON-RPC (HTTP) |
 | 8081 | Monad WebSocket (`eth_subscribe`) — available, not required for this flow |
-| 8089 | magma-sidecar HTTP (`/rpc/monad`, `/health`) |
+| 8089 | magma-sidecar HTTP (`/health`, `/metrics`) |
 | `docker/single-node/logs/<run>/node/mempool.sock` | Monad txpool IPC socket (per-run host path) — consumed by the sidecar |
 
 ## Prerequisites
@@ -144,8 +142,7 @@ cargo run --release
 
 This wires up:
 
-- `MAGMA_SIDECAR_BIND=0.0.0.0:8089`
-- `MAGMA_MONAD_RPC_URL=http://127.0.0.1:8080`
+- `MAGMA_SIDECAR_BIND=0.0.0.0:8089` — observability HTTP (`/health`, `/metrics`)
 - `MAGMA_TXPOOL_SOCKET=/tmp/monad-mempool.sock` — the short symlink from §1a
 - `MAGMA_NETWORK=localnet` — selects the local-devnet gateway address baked into `src/policy.rs`
 - `MAGMA_TX_PRIORITY=0xffff` — fallback priority
@@ -153,7 +150,7 @@ This wires up:
 
 A successful attach logs `connected to Monad txpool IPC path=/tmp/monad-mempool.sock`. If you see `txpool IPC connect failed; retrying`, revisit §1a — the socket either isn't writable by your user or the path you passed is over 107 bytes.
 
-To exercise the tip-scoring policy locally, set `MAGMA_NETWORK=localnet`; the gateway address is the one written by `make deploy` in `mev-entrypoint/test-scripts/` (deterministic for anvil account #0 at nonce 0). Without `MAGMA_NETWORK`, every `Insert` is stamped with the constant `MAGMA_TX_PRIORITY` and the gateway-only filter is bypassed — useful for ingress-only smoke tests, not for scoring.
+To exercise the tip-scoring policy locally, set `MAGMA_NETWORK=localnet`; the gateway address is the one written by `make deploy` in `mev-entrypoint/test-scripts/` (deterministic for anvil account #0 at nonce 0). Without `MAGMA_NETWORK`, every `Insert` is stamped with the constant `MAGMA_TX_PRIORITY` and the gateway-only filter is bypassed — a legacy single-tenant mode, not for scoring.
 
 #### Override on the command line when you want to
 
@@ -171,11 +168,6 @@ curl -s http://127.0.0.1:8089/health | jq
 
 curl -s http://127.0.0.1:8089/metrics | head
 # # HELP magma_sidecar_txpool_ipc_state ...
-
-curl -s -X POST http://127.0.0.1:8089/rpc/monad \
-  -H 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}'
-# expect 0x4eaf via Monad
 ```
 
 The sidecar logs `txpool_ipc=...` when it attaches to the socket, and emits `EthTxPoolIpcTx` reinjections with a tip-derived priority for each `Insert` event it observes.
@@ -198,21 +190,13 @@ make deploy
 
 `make deploy` writes **`deployments.local.env`** with `GATEWAY`, `COUNTER`, `SEARCHER_A..D`, `UNLISTED_GATEWAY`, `UNLISTED_SEARCHER`, `ARB_POOL`, `TARGET_SEARCHER`, `BACKRUN_SEARCHER_B..D`, `ORDER_COUNTER`, and `ORDER_SEARCHER_A..D`. Defaults in the Makefile match Anvil-style dev keys and `RPC_URL=http://127.0.0.1:8080`. The `GATEWAY` it writes must match the `localnet` address baked into the sidecar's `src/policy.rs` (it does for a deterministic anvil-#0 deploy).
 
-You can target the deploy through the sidecar's `/rpc/monad` ingress instead of the node directly by overriding:
-
-```bash
-make deploy RPC_URL=http://127.0.0.1:8089/rpc/monad
-```
-
-Both paths land the deployment txs in the same Monad txpool.
+Deploy txs go straight to the node's RPC on `:8080`; the sidecar reprioritizes them by observing the txpool, so there's no separate endpoint to route through.
 
 ---
 
 ## 4. Run the conflict tests
 
-The harness in `mev-entrypoint/test-scripts/` ships a set of `make test-*` targets that sign competing `magmaSearcherGatewayCall` txs and submit them via `eth_sendRawTransaction`. The sidecar observes them on the txpool, scores each by **`gas_limit × effective_priority_fee + bidAmount`** (see `src/policy.rs`), and re-injects with that priority — which is exactly what these tests assert. Each target exits non-zero on a mismatch, so they double as CI checks.
-
-Point the harness at the sidecar's ingress so the path matches production (`RPC_URL=http://127.0.0.1:8089/rpc/monad`); the defaults submit to the node on `:8080` directly, which also works since both land in the same txpool.
+The harness in `mev-entrypoint/test-scripts/` ships a set of `make test-*` targets that sign competing `magmaSearcherGatewayCall` txs and submit them via `eth_sendRawTransaction` to the node's RPC on `:8080`. The sidecar observes them on the txpool, scores each by **`gas_limit × effective_priority_fee + bidAmount`** (see `src/policy.rs`), and re-injects with that priority — which is exactly what these tests assert. Each target exits non-zero on a mismatch, so they double as CI checks.
 
 ```bash
 cd /path/to/mev-entrypoint/test-scripts
@@ -229,10 +213,10 @@ make test-order            # full in-block ordering: N non-conflicting txs at di
 make counter-read          # read count() / lastIncrementBlock() after a counter-based run
 ```
 
-Common tunables (see `test-scripts/README.md` and the Makefile): `RPC_URL`, `ROUNDS`, `TIP_*_ETHER`, `DELAY_MS`, `RECEIPT_TIMEOUT_SECS`. For example, to drive everything through the sidecar:
+Common tunables (see `test-scripts/README.md` and the Makefile): `RPC_URL`, `ROUNDS`, `TIP_*_ETHER`, `DELAY_MS`, `RECEIPT_TIMEOUT_SECS`. For example, to point at a non-default node RPC:
 
 ```bash
-make test-ranking RPC_URL=http://127.0.0.1:8089/rpc/monad
+make test-ranking RPC_URL=http://127.0.0.1:8080
 ```
 
 ### Correlating with sidecar logs
@@ -256,7 +240,7 @@ Three terminals plus a one-shot fix-up after each fresh `nets/run.sh`:
 3. **`magma-sidecar`**: `set -a; source .env.local; set +a; cargo run --release` (one-time setup: `cp .env.example .env.local`)
 4. **Conflict tests**: `cd mev-entrypoint/test-scripts && make deploy && make test-bundles` (also `test-stress` / `test-ranking` / `test-non-gateway-noop` / `test-backrun` / `test-order`; see §4)
 
-End-to-end data path: **searcher tx → magma-sidecar `/rpc/monad`** → **Monad txpool** → **magma-sidecar reads `EthTxPoolEvent`s, scores by tip, re-injects with priority** → **node honors priority for next block** → **on-chain test contracts**.
+End-to-end data path: **searcher tx → Monad node RPC** → **Monad txpool** → **magma-sidecar reads `EthTxPoolEvent`s, scores by tip, re-injects with priority** → **node honors priority for next block** → **on-chain test contracts**.
 
 ---
 
@@ -318,9 +302,9 @@ ls -lL /tmp/monad-mempool.sock   # expect: srw-rw-rw-
 
 After any of these fixes, the sidecar should log `connected to Monad txpool IPC path=/tmp/monad-mempool.sock` on the next reconnect attempt without needing a restart.
 
-### `eth_chainId` works on `:8089` but no `Insert` events are observed
+### `/health` is reachable on `:8089` but no `Insert` events are observed
 
-`/rpc/monad` is just an HTTP forwarder to `monad-rpc:8080`, so a working `eth_chainId` round-trip only proves the HTTP leg is healthy — it says nothing about the txpool IPC leg. Check `/health`:
+A reachable `/health` endpoint only proves the sidecar's HTTP server is up — it says nothing about the txpool IPC leg. Check `/health`:
 
 ```bash
 curl -s http://127.0.0.1:8089/health | jq

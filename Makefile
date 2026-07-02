@@ -86,9 +86,8 @@ build-deb-arm64: ## Build an arm64 .deb (cross via `cross` on amd64 hosts)
 docker-build: ## Build a single-arch local docker image (tag: $(DOCKER_IMAGE):$(DOCKER_TAG))
 	docker build -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
 
-docker-run: ## Run the locally-built image in ingress-only mode against host RPC
+docker-run: ## Run the locally-built image (observability-only: /health, /metrics)
 	docker run --rm -p 8089:8089 \
-	    -e MAGMA_MONAD_RPC_URL=http://host.docker.internal:8545 \
 	    $(DOCKER_IMAGE):$(DOCKER_TAG)
 
 # ----- Local dev (monad-bft single-node) ----------------------------------

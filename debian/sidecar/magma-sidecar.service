@@ -31,5 +31,31 @@ RestrictNamespaces=true
 LockPersonality=true
 ReadOnlyPaths=/etc/magma-sidecar
 
+# Resource containment (cgroup v2) so a compromised or runaway sidecar can
+# never starve the validator's CPU/memory/IO. Memory/task caps are conservative
+# starting points — retune against measured peak usage (`systemctl status
+# magma-sidecar` reports memory peak; `systemd-cgtop`).
+MemoryHigh=512M
+MemoryMax=768M
+MemorySwapMax=0
+# Generous vs Tokio's worker + blocking-thread pools; too low fails spawns
+# under HTTP-ingress load. Confirm against observed thread count before tightening.
+TasksMax=512
+# CPU pinning: run on the RPC cores (12-15), not the node's consensus cores
+# (8-11). The RPC path is far less latency-critical than consensus, so sharing
+# it keeps the reprioritizer off the hot cores at negligible cost. Operators
+# whose core layout differs can override these via a drop-in
+# (`systemctl edit magma-sidecar`; survives upgrades). See docs/RELEASING.md.
+AllowedCPUs=12-15
+CPUAffinity=12,13,14,15
+# Yield to co-located services under contention (CPUWeight, default 100) and cap
+# absolute burn at one core-equivalent (CPUQuota). Light, latency-sensitive.
+CPUWeight=50
+CPUQuota=100%
+# Deprioritize vs the node under disk contention.
+IOWeight=50
+# FD ceiling: HTTP ingress + txpool IPC + outbound RPC.
+LimitNOFILE=65536
+
 [Install]
 WantedBy=multi-user.target
