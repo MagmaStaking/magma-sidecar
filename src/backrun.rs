@@ -7,11 +7,11 @@
 //! *immediately behind its target*, using the structured priority encoders in
 //! [`crate::policy`].
 //!
-//! How we differ from `fastlane-sidecar`:
-//! - **Bidirectional matching.** FastLane only pairs when the target is already
-//!   pooled at bid time and never re-scans. We index pending bids by target hash
-//!   and flush them when the target shows up later, so pairing is independent of
-//!   arrival order.
+//! Design of this pairing model:
+//! - **Bidirectional matching.** We index pending bids by target hash and flush
+//!   them when the target shows up later, so pairing is independent of arrival
+//!   order (rather than only pairing when the target is already pooled at bid
+//!   time).
 //! - **Competitive bids.** Every bid for a target is streamed; the bit-field
 //!   self-orders them by total realized validator value (the same
 //!   `priority_fee * gas_limit + bidAmount` scalar TOB bids use), directly behind
@@ -20,8 +20,8 @@
 //!   configurable TTL and are capacity-bounded; pairing counters are surfaced for
 //!   observability.
 //!
-//! We also avoid FastLane's original-RLP plumbing: alloy `TxEnvelope` round-trips
-//! through the IPC wire format, so we cache and re-inject the decoded envelope.
+//! We cache and re-inject the decoded alloy `TxEnvelope` (which round-trips
+//! through the IPC wire format) rather than carrying the original RLP separately.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;

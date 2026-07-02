@@ -103,6 +103,43 @@ curl -s http://127.0.0.1:8089/health | jq   # ipc_state: "connected"
 `postinst` seeds `sidecar.env` only on first install, so upgrades never clobber
 operator config.
 
+### Resource limits & CPU pinning
+
+The shipped unit ([`debian/sidecar/magma-sidecar.service`](../debian/sidecar/magma-sidecar.service))
+applies cgroup v2 caps so a runaway or compromised sidecar can't starve the
+node: `MemoryHigh`/`MemoryMax` (soft throttle then hard OOM ceiling), `TasksMax`,
+`CPUWeight` + `CPUQuota` (yields under contention, capped at one core),
+`IOWeight`, and `LimitNOFILE`. It also **pins to cores 12-15** (`AllowedCPUs`/
+`CPUAffinity`) — the RPC cores — to keep the reprioritizer off the node's
+consensus cores (8-11), where scheduler jitter would matter most; the RPC path
+is far less latency-critical, so co-locating there is cheap. The memory/task
+caps are conservative starting points, not measured — validate and retune:
+
+```bash
+systemctl status magma-sidecar     # reports memory peak
+systemd-cgtop                       # live CPU/mem/IO per service
+```
+
+If a host's core layout differs from the standard 8-11 (consensus) / 12-15 (RPC)
+split, override the pinning (or any cap) via a **drop-in** rather than editing
+the packaged unit — drop-ins survive `apt upgrade`:
+
+```bash
+# See which cores are already claimed so you can pick a non-consensus set:
+systemctl show monad-bft -p AllowedCPUs -p CPUAffinity   # node (consensus)
+systemctl show monad-rpc -p AllowedCPUs -p CPUAffinity   # RPC
+
+sudo systemctl edit magma-sidecar
+# In the editor:
+#   [Service]
+#   AllowedCPUs=<non-consensus cores>
+#   CPUAffinity=<non-consensus cores>
+#   # Or raise the memory ceiling on a busy host:
+#   MemoryMax=1G
+sudo systemctl daemon-reload && sudo systemctl restart magma-sidecar
+systemctl show magma-sidecar -p MemoryMax -p CPUQuotaPerSecUSec -p AllowedCPUs -p TasksMax
+```
+
 ## Upgrade / rollback
 
 - **Upgrade:** `sudo apt update && sudo apt install magma-sidecar=X.Y.Z` — `prerm`

@@ -14,7 +14,7 @@ The model is **naive, tip-based MEV**: searchers compete for inclusion order thr
 
 **Ingress:** Searchers submit transactions **directly to the Monad node's JSON-RPC**, and they land in the node's txpool. 
 
-**Reprioritization:** magma-sidecar is connected to the node's **txpool IPC** and observes `EthTxPoolEvent`s. For each inserted transaction whose `to` is an allowlisted `MagmaSearcherGateway`, it computes a **priority** from the tx's tip (priority fee + bid declared to the gateway, decoded from `magmaSearcherGatewayCall` calldata) and re-injects the tx with that priority over IPC. Vanilla traffic (`to` not on the allowlist, or `CREATE`) is **observed but not reinjected** — the node's default ordering applies, and the sidecar does not contend with other reprioritizers (e.g. `fastlane-sidecar`) over unrelated traffic. The node uses the supplied priority when constructing the next block.
+**Reprioritization:** magma-sidecar is connected to the node's **txpool IPC** and observes `EthTxPoolEvent`s. For each inserted transaction whose `to` is an allowlisted `MagmaSearcherGateway`, it computes a **priority** from the tx's tip (priority fee + bid declared to the gateway, decoded from `magmaSearcherGatewayCall` calldata) and re-injects the tx with that priority over IPC. Vanilla traffic (`to` not on the allowlist, or `CREATE`) is **observed but not reinjected** — the node's default ordering applies, and the sidecar does not contend with other reprioritizers over unrelated traffic. The node uses the supplied priority when constructing the next block.
 
 ```mermaid
 flowchart LR
@@ -59,7 +59,7 @@ The Rust binary **`magma-sidecar`** exposes observability HTTP endpoints documen
 - **Health:** `GET /health` for liveness (IPC state + counters).
 - **Metrics:** `GET /metrics` for Prometheus exposition.
 
-**Txpool IPC:** with `--txpool-socket` / `MAGMA_TXPOOL_SOCKET`, the sidecar connects to the node's txpool Unix socket (length-delimited frames, bincode event batches in, RLP `EthTxPoolIpcTx` out, as implemented in `monad-eth-txpool-ipc`). It subscribes to `EthTxPoolEvent` streams and re-injects **Insert** transactions whose `to` is an allowlisted `MagmaSearcherGateway` with a computed **priority**, deduplicating echoes of its own reinjections. The Monad txpool IPC server accepts multiple concurrent clients, so a validator can also run a peer reprioritizer (e.g. `fastlane-sidecar`) on the same socket; the gateway-targeted filter ensures the two services scope their priority decisions to disjoint traffic.
+**Txpool IPC:** with `--txpool-socket` / `MAGMA_TXPOOL_SOCKET`, the sidecar connects to the node's txpool Unix socket (length-delimited frames, bincode event batches in, RLP `EthTxPoolIpcTx` out, as implemented in `monad-eth-txpool-ipc`). It subscribes to `EthTxPoolEvent` streams and re-injects **Insert** transactions whose `to` is an allowlisted `MagmaSearcherGateway` with a computed **priority**, deduplicating echoes of its own reinjections. The Monad txpool IPC server accepts multiple concurrent clients, so a validator can also run a peer reprioritizer on the same socket; the gateway-targeted filter ensures the services scope their priority decisions to disjoint traffic.
 
 ### Priority policy
 
@@ -107,7 +107,7 @@ To pair a bid with its target the sidecar keeps a small, TTL-bounded state in [`
 
 Pairing activity is surfaced on both `/health` and `/metrics`. The Prometheus metric names are `backrun_pairs_matched_total`, `backrun_bids_pended_total`, `backrun_bids_expired_total`, and the `backrun_pending` / `backrun_cache` gauges; the `/health` JSON uses slightly different keys (`backrun_pairs_matched`, `backrun_bids_pending`, `backrun_bids_expired`).
 
-This differs from `fastlane-sidecar`, which only pairs when the target is already pooled at bid time, never re-scans, and does not actively manage competing bids.
+This is deliberately more active than a reprioritizer that only pairs when the target is already pooled at bid time, never re-scans, and does not manage competing bids: magma matches arrival-order-independently and actively ranks competing bids behind their target.
 
 ### Monad node (`monad-bft`)
 
