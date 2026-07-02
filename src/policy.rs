@@ -77,9 +77,9 @@ sol! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum Network {
-    /// Magma mainnet.
+    /// Monad mainnet (chain id 143).
     Mainnet,
-    /// Magma testnet.
+    /// Monad testnet (chain id 10143).
     Testnet,
     /// Local Monad devnet — gateway address comes from
     /// `mev-entrypoint/test-scripts/script/DeployCounterSearchers.s.sol`,
@@ -91,10 +91,10 @@ impl Network {
     /// The single allowlisted `MagmaSearcherGateway` for this network.
     pub const fn gateway(self) -> Address {
         match self {
-            // TODO(magma): replace with the real mainnet gateway address once deployed.
-            Self::Mainnet => address!("0000000000000000000000000000000000000000"),
-            // TODO(magma): replace with the real testnet gateway address once deployed.
-            Self::Testnet => address!("0000000000000000000000000000000000000000"),
+            // MagmaSearcherGateway proxy on Monad mainnet (mev-entrypoint README).
+            Self::Mainnet => address!("0xe0232Cf5ee0c6d79118498c29a267D80881011C5"),
+            // MagmaSearcherGateway proxy on Monad testnet (mev-entrypoint README).
+            Self::Testnet => address!("0x21615eDffD849eEd1C08e780032Da3bCd1003CD3"),
             // Deterministic deployment from `make deploy` in mev-entrypoint/test-scripts/.
             Self::Localnet => address!("0xe7f1725e7734ce288f8367e1bb143e90bb3f0512"),
         }
@@ -154,11 +154,11 @@ impl PolicyConfig {
     }
 
     /// True when this policy's gateway is the zero address — i.e. the selected
-    /// network has no real gateway baked into this build yet (the
-    /// mainnet/testnet placeholders in [`Network::gateway`]). A tx can never be
-    /// `to == 0x0`, so a policy in this state would silently match nothing and
-    /// reinject no MEV traffic. Callers should refuse to start rather than run
-    /// a no-op reprioritizer; see `main.rs`.
+    /// network has no real gateway baked into this build yet (e.g. a newly
+    /// added network in [`Network::gateway`] before its address is filled in).
+    /// A tx can never be `to == 0x0`, so a policy in this state would silently
+    /// match nothing and reinject no MEV traffic. Callers should refuse to start
+    /// rather than run a no-op reprioritizer; see `main.rs`.
     pub fn gateway_is_unset(&self) -> bool {
         self.gateway == Address::ZERO
     }
@@ -527,7 +527,9 @@ mod tests {
 
     #[test]
     fn network_constants_are_well_formed() {
-        // Sanity: localnet is the only network with a real address today.
+        // Every network has a real (non-zero) gateway address baked in.
+        assert_ne!(Network::Mainnet.gateway(), Address::ZERO);
+        assert_ne!(Network::Testnet.gateway(), Address::ZERO);
         assert_ne!(Network::Localnet.gateway(), Address::ZERO);
         assert_eq!(Network::Mainnet.base_fee_floor_wei(), 0);
         assert_eq!(Network::Testnet.base_fee_floor_wei(), 0);

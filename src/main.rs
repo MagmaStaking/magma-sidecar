@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Some(network) => {
             let policy = PolicyConfig::for_network(network);
             // Refuse to start a network whose gateway address isn't baked into
-            // this build yet (mainnet/testnet placeholders resolve to 0x0). A tx
+            // this build yet (a not-yet-filled-in network resolves to 0x0). A tx
             // can never target 0x0, so the allowlist would match nothing and the
             // sidecar would run as a silent no-op reprioritizer — the worst
             // failure mode for a validator. Fail loudly instead.

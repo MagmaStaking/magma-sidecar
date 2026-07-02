@@ -164,8 +164,8 @@ There is exactly one `MagmaSearcherGateway` per network. The address is baked in
 
 | `--network` | Gateway address | Notes |
 |---|---|---|
-| `mainnet` | (TODO: real address) | placeholder until the mainnet gateway is deployed |
-| `testnet` | (TODO: real address) | placeholder until the testnet gateway is deployed |
+| `mainnet` | `0xe0232Cf5ee0c6d79118498c29a267D80881011C5` | `MagmaSearcherGateway` proxy on Monad mainnet (chain id 143) |
+| `testnet` | `0x21615eDffD849eEd1C08e780032Da3bCd1003CD3` | `MagmaSearcherGateway` proxy on Monad testnet (chain id 10143) |
 | `localnet` | `0x8f86403a4de0bb5791fa46b8e795c547942fe4cf` | deterministic deployment from `mev-entrypoint/test-scripts/make deploy` against the local Monad devnet |
 
 The score is `priority_fee × gas_limit + bid`, where the bid is:

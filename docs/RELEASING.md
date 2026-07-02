@@ -20,11 +20,12 @@ Assumed already in place:
 
 ## Before every release
 
-1. **Bake the gateway address for the target network.** `mainnet`/`testnet` ship as
-   `0x0` placeholders and the startup guard refuses to boot on them. Deploy the
-   `MagmaSearcherGateway`, set its address (and `base_fee_floor_wei` if non-zero) in
-   [`src/policy.rs`](../src/policy.rs), and merge that to `main`. `localnet` is always
-   runnable.
+1. **Bake the gateway address for the target network.** `mainnet`, `testnet`, and
+   `localnet` all have their `MagmaSearcherGateway` address baked into
+   [`src/policy.rs`](../src/policy.rs) today. If a gateway is redeployed (or a new
+   network is added — it starts as a `0x0` placeholder that the startup guard refuses
+   to boot on), update its address (and `base_fee_floor_wei` if non-zero) there and
+   merge to `main` before releasing.
 2. **Land everything on `main`** and confirm CI (`ci.yml`: fmt + clippy + test) is green.
    `Cargo.lock` must be committed.
 3. **Update [`CHANGELOG.md`](../CHANGELOG.md):** move `Unreleased` items into a new
