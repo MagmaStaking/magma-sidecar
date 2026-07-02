@@ -92,7 +92,7 @@ sudo apt install magma-sidecar=X.Y.Z        # pin the version explicitly
 # or, from the GitHub Release:
 #   sudo dpkg -i magma-sidecar_X.Y.Z_amd64.deb
 
-sudo vim /etc/magma-sidecar/sidecar.env     # MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, MAGMA_NETWORK
+sudo vim /etc/magma-sidecar/sidecar.env     # MAGMA_TXPOOL_SOCKET, MAGMA_NETWORK
 sudo systemctl enable --now magma-sidecar
 sudo systemctl status magma-sidecar
 journalctl -u magma-sidecar -f              # "loaded tip policy network=..." then "connected to Monad txpool IPC"

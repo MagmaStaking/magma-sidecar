@@ -4,13 +4,20 @@ All notable changes to **magma-sidecar** are documented here. This project follo
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while the major version is
 `0`, behaviour may change between minor releases.
 
+## [Unreleased]
+
+### Removed
+
+- Dropped the transparent JSON-RPC ingress (`POST /rpc/monad`) and its `MAGMA_MONAD_RPC_URL`
+  configuration. Searchers submit to the Monad node's JSON-RPC directly and the sidecar reprioritizes what it observes on
+  the txpool IPC socket. The HTTP server now serves `/health` and `/metrics` only.
+
 ## [0.1.0] - 2026-06-25
 
 Initial beta release.
 
 A co-located sidecar for a Monad validator that:
 
-- forwards searcher JSON-RPC to the Monad EL (`POST /rpc/monad`), and
 - reprioritizes the node's txpool over IPC, ranking transactions to the allowlisted
   `MagmaSearcherGateway` by tip (`priority_fee × gas_limit + bidAmount`), including
   backrun bid/target pairing.

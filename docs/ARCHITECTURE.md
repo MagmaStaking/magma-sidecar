@@ -12,7 +12,7 @@ The model is **naive, tip-based MEV**: searchers compete for inclusion order thr
 
 ## End-to-end data flow
 
-**Ingress:** Searchers submit transactions either **directly to the Monad node's JSON-RPC** or **to magma-sidecar's HTTP ingress** (which forwards into the node's RPC). Either way, they land in the node's txpool.
+**Ingress:** Searchers submit transactions **directly to the Monad node's JSON-RPC**, and they land in the node's txpool. 
 
 **Reprioritization:** magma-sidecar is connected to the node's **txpool IPC** and observes `EthTxPoolEvent`s. For each inserted transaction whose `to` is an allowlisted `MagmaSearcherGateway`, it computes a **priority** from the tx's tip (priority fee + bid declared to the gateway, decoded from `magmaSearcherGatewayCall` calldata) and re-injects the tx with that priority over IPC. Vanilla traffic (`to` not on the allowlist, or `CREATE`) is **observed but not reinjected** — the node's default ordering applies, and the sidecar does not contend with other reprioritizers (e.g. `fastlane-sidecar`) over unrelated traffic. The node uses the supplied priority when constructing the next block.
 
@@ -30,9 +30,7 @@ flowchart LR
     M[Monad node]
   end
 
-  SB -->|"raw tx via HTTP"| SC
   SB -->|"raw tx via JSON-RPC"| M
-  SC -->|"forward eth_sendRawTransaction"| M
   M -->|"EthTxPoolEvent stream (IPC)"| SC
   SC -->|"EthTxPoolIpcTx (RLP + priority)"| M
 ```
@@ -49,17 +47,17 @@ flowchart LR
 ### Magma sidecar (this repository)
 
 - **Role**: sit beside the Monad node, observe txpool events, and feed back tx priorities so MEV-relevant traffic is ordered ahead of vanilla traffic.
-- **Ingress (HTTP)**: accept JSON-RPC from searchers (e.g. `eth_sendRawTransaction`) and forward to the Monad EL JSON-RPC, giving searchers a routing alternative to hitting the node directly.
 - **Reprioritization (IPC)**: subscribe to the node's txpool over the Unix socket, classify each `Insert` event, and — only for transactions targeting an allowlisted `MagmaSearcherGateway` — compute a tip-based priority and stream the tx back over IPC with that priority. All other Insert events are observed for state tracking but left alone.
+- **Observability (HTTP)**: expose `/health` and `/metrics` for liveness and Prometheus scraping.
 
 **Repository boundary:** `magma-sidecar` is a standalone Cargo project. For txpool IPC it depends on `monad-eth-txpool-ipc` / `monad-eth-txpool-types` as **git dependencies pinned by `rev`** to the upstream `category-labs/monad-bft` repo (both crates must come from the same tree to keep the wire format in sync; see [`README.md`](../README.md)). A sibling-checkout `path` override is available for local development. Wire formats and socket paths are defined in `monad-bft` and consumed here.
 
 ### Sidecar implementation (this repo)
 
-The Rust binary **`magma-sidecar`** exposes HTTP endpoints documented in [`README.md`](../README.md):
+The Rust binary **`magma-sidecar`** exposes observability HTTP endpoints documented in [`README.md`](../README.md):
 
-- **Ingress:** `POST /rpc/monad` forwards arbitrary JSON-RPC (including `eth_sendRawTransaction`) to the Monad EL.
-- **Health:** `GET /health` for liveness.
+- **Health:** `GET /health` for liveness (IPC state + counters).
+- **Metrics:** `GET /metrics` for Prometheus exposition.
 
 **Txpool IPC:** with `--txpool-socket` / `MAGMA_TXPOOL_SOCKET`, the sidecar connects to the node's txpool Unix socket (length-delimited frames, bincode event batches in, RLP `EthTxPoolIpcTx` out, as implemented in `monad-eth-txpool-ipc`). It subscribes to `EthTxPoolEvent` streams and re-injects **Insert** transactions whose `to` is an allowlisted `MagmaSearcherGateway` with a computed **priority**, deduplicating echoes of its own reinjections. The Monad txpool IPC server accepts multiple concurrent clients, so a validator can also run a peer reprioritizer (e.g. `fastlane-sidecar`) on the same socket; the gateway-targeted filter ensures the two services scope their priority decisions to disjoint traffic.
 
@@ -114,7 +112,7 @@ This differs from `fastlane-sidecar`, which only pairs when the target is alread
 ### Monad node (`monad-bft`)
 
 - Execution, consensus, **txpool**, and RPC layers.
-- Accepts raw transactions on JSON-RPC from any source (including the sidecar's `/rpc/monad`) and emits txpool events over IPC.
+- Accepts raw transactions on JSON-RPC directly from searchers and emits txpool events over IPC.
 - Honors the priority supplied by the sidecar's `EthTxPoolIpcTx` reinjection when constructing the next block, so the **tip-derived ordering** becomes the effective inclusion order.
 
 ## Platform topics (not specific to this repo)
@@ -128,7 +126,7 @@ These items affect **classification quality**, **ingress**, and **reward routing
 
 ### Transaction ingress
 
-- The **dedicated searcher endpoints** (sidecar HTTP and node RPC) ensure MEV-relevant traffic lands on the local txpool the sidecar is wired to, where reprioritization applies.
+- Searchers submit to the **node's JSON-RPC** so MEV-relevant traffic lands on the local txpool the sidecar is wired to, where reprioritization applies.
 
 ### Rewards: block proposer vs MEV sink
 
@@ -140,7 +138,7 @@ These items affect **classification quality**, **ingress**, and **reward routing
 |------|------|
 | `mev-entrypoint` | Gateway + searcher interfaces (Solidity) |
 | `monad-bft` | Monad node; txpool, RPC, consensus, IPC protocol |
-| `magma-sidecar` (this repo) | Sidecar service: HTTP ingress + tip-based txpool reprioritization |
+| `magma-sidecar` (this repo) | Sidecar service: tip-based txpool IPC reprioritization |
 
 ## Glossary
 

@@ -1,14 +1,14 @@
 //! Configuration (CLI + environment).
 //!
 //! See `docs/ARCHITECTURE.md`. The sidecar is a thin process with two surfaces:
-//! a Monad JSON-RPC ingress proxy, and an optional txpool IPC reprioritizer.
+//! an observability HTTP server (`/health`, `/metrics`), and the txpool IPC
+//! reprioritizer.
 
 use std::path::PathBuf;
 
 use alloy_primitives::U256;
 use clap::Parser;
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use crate::policy::Network;
 
@@ -25,24 +25,12 @@ pub fn parse_u256_hex(s: &str) -> Result<U256, String> {
 #[derive(Debug, Clone, Parser)]
 #[command(name = "magma-sidecar")]
 #[command(
-    about = "Sidecar for Monad: HTTP ingress + tip-based txpool reprioritization (see docs/ARCHITECTURE.md)"
+    about = "Sidecar for Monad: tip-based txpool IPC reprioritization (see docs/ARCHITECTURE.md)"
 )]
 pub struct Config {
-    /// Address to bind the HTTP server (e.g. 0.0.0.0:8089)
+    /// Address to bind the observability HTTP server (`/health`, `/metrics`), e.g. 0.0.0.0:8089
     #[arg(long, env = "MAGMA_SIDECAR_BIND", default_value = "127.0.0.1:8089")]
     pub bind: SocketAddr,
-
-    /// Base URL of the Monad EL JSON-RPC (target of `/rpc/monad` forwards)
-    #[arg(long, env = "MAGMA_MONAD_RPC_URL")]
-    pub monad_rpc_url: String,
-
-    /// Timeout for outbound HTTP to Monad
-    #[arg(long, env = "MAGMA_HTTP_TIMEOUT_SECS", default_value_t = 30)]
-    pub http_timeout_secs: u64,
-
-    /// Max JSON body size for JSON-RPC forward (bytes)
-    #[arg(long, default_value_t = 12 * 1024 * 1024)]
-    pub max_body_bytes: usize,
 
     /// Optional path to Monad txpool IPC Unix socket (same wire as `monad-eth-txpool-ipc`).
     /// When set, the sidecar subscribes to txpool events and re-injects `EthTxPoolIpcTx`
@@ -73,10 +61,4 @@ pub struct Config {
     /// caches at once (oldest evicted first). Only used in policy mode.
     #[arg(long, env = "MAGMA_BACKRUN_POOL_MAX", default_value_t = 4096)]
     pub backrun_pool_max: usize,
-}
-
-impl Config {
-    pub fn http_timeout(&self) -> Duration {
-        Duration::from_secs(self.http_timeout_secs)
-    }
 }

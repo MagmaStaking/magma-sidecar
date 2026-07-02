@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1.7
 #
-# magma-sidecar: HTTP ingress + optional txpool IPC reprioritizer for Monad.
+# magma-sidecar: txpool IPC reprioritizer for Monad (+ /health, /metrics).
 # See README.md and docs/ARCHITECTURE.md.
 #
 # Build:    docker build -t magma-sidecar .
-# Run:      docker run --rm -p 8089:8089 \
-#             -e MAGMA_MONAD_RPC_URL=http://host.docker.internal:8545 \
-#             magma-sidecar
+# Run:      docker run --rm -p 8089:8089 magma-sidecar
+#           (no txpool socket = observability-only: /health, /metrics)
 #
 # With txpool IPC + network policy (bind-mount the node's socket dir; pick the
 # network whose gateway should be scored. Keep the in-container socket path
@@ -15,7 +14,6 @@
 #
 #   docker run --rm -p 8089:8089 \
 #     -v /run/monad:/run/monad:ro \
-#     -e MAGMA_MONAD_RPC_URL=http://host.docker.internal:8545 \
 #     -e MAGMA_TXPOOL_SOCKET=/run/monad/mempool.sock \
 #     -e MAGMA_NETWORK=localnet \
 #     magma-sidecar
@@ -58,12 +56,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 ############################
 FROM debian:${DEBIAN_RELEASE}-slim AS runtime
 
-# ca-certificates: outbound HTTPS to the Monad RPC (reqwest uses rustls-tls,
-# so no openssl needed — just the system root CA bundle).
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
- && rm -rf /var/lib/apt/lists/* \
- && groupadd --system --gid 1000 magma \
+# The sidecar makes no outbound network calls (txpool IPC is a local Unix
+# socket; the HTTP server is inbound-only), so no CA bundle is needed at runtime.
+RUN groupadd --system --gid 1000 magma \
  && useradd  --system --uid 1000 --gid magma \
         --home-dir /nonexistent --shell /usr/sbin/nologin magma
 

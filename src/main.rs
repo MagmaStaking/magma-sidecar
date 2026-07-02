@@ -1,11 +1,9 @@
-//! Magma sidecar — HTTP ingress + tip-based txpool reprioritization for a Monad node.
+//! Magma sidecar — tip-based txpool IPC reprioritization for a Monad node.
 //!
 //! See `docs/ARCHITECTURE.md` for the end-to-end design.
 
 mod backrun;
 mod config;
-mod error;
-mod forward;
 mod metrics;
 mod policy;
 mod routes;
@@ -21,7 +19,6 @@ use metrics::Metrics;
 use policy::PolicyConfig;
 use routes::{router, HttpState};
 use tokio::sync::watch;
-use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 use txpool_ipc::PriorityMode;
@@ -80,22 +77,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
-    let max_body = config.max_body_bytes;
     let bind: SocketAddr = config.bind;
     let txpool_socket = config.txpool_socket.clone();
 
     let metrics = Metrics::new();
-    let state = HttpState::try_new(config, metrics.clone())?;
+    let state = HttpState::new(metrics.clone());
     tracing::info!(
         %bind,
-        monad_rpc = %state.config.monad_rpc_url,
         txpool_ipc = ?txpool_socket,
         "starting magma-sidecar"
     );
 
-    let app = router(state)
-        .layer(RequestBodyLimitLayer::new(max_body))
-        .layer(TraceLayer::new_for_http());
+    let app = router(state).layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
 

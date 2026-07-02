@@ -24,7 +24,7 @@ case "$1" in
 
         # Register/reload the unit with systemd, but *do not* enable it
         # automatically — operators must edit /etc/magma-sidecar/sidecar.env
-        # (at minimum MAGMA_MONAD_RPC_URL, MAGMA_TXPOOL_SOCKET, MAGMA_NETWORK)
+        # (at minimum MAGMA_TXPOOL_SOCKET, MAGMA_NETWORK)
         # before the service is safe to start. The gateway address per network
         # is baked into the binary; there is no policy file to drop in.
         if [ -d /run/systemd/system ]; then
@@ -44,7 +44,6 @@ magma-sidecar installed.
 The service is **not** enabled yet. Before starting it:
 
   1. Edit /etc/magma-sidecar/sidecar.env, at minimum set:
-       - MAGMA_MONAD_RPC_URL
        - MAGMA_TXPOOL_SOCKET
        - MAGMA_NETWORK   (mainnet | testnet | localnet)
      The gateway address for each network is baked into the binary; switching
