@@ -6,12 +6,25 @@ All notable changes to **magma-sidecar** are documented here. This project follo
 
 ## [Unreleased]
 
+## [0.1.03] - 2026-07-02
+
 ### Added
 
 - Baked in the deployed `MagmaSearcherGateway` proxy addresses for `mainnet`
   (`0xe0232Cf5ee0c6d79118498c29a267D80881011C5`) and `testnet`
   (`0x21615eDffD849eEd1C08e780032Da3bCd1003CD3`), replacing the `0x0`
   placeholders. All three networks are now runnable.
+- Hardened the systemd unit with cgroup resource caps (`MemoryHigh`/`MemoryMax`,
+  `MemorySwapMax`, `TasksMax`, `IOWeight`, `LimitNOFILE`) and CPU containment
+  (`CPUWeight`/`CPUQuota` plus pinning to non-consensus cores), so a runaway or
+  compromised sidecar can't starve the validator. Retunable per host via a
+  systemd drop-in — see `docs/RELEASING.md`.
+
+### Changed
+
+- APT distribution moved from S3 to GitHub Pages; packages are published via
+  GitHub-signed commits (see `docs/RELEASING.md`). Install instructions and the
+  repo/key URLs in `README.md` are updated accordingly.
 
 ### Removed
 
@@ -39,4 +52,5 @@ Monad node release here before tagging).
 placeholders (only `localnet` was runnable; the startup guard enforced this). The real
 addresses were baked in later — see the `Unreleased` section above.
 
+[0.1.03]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.03
 [0.1.0]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.0
