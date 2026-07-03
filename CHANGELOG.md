@@ -6,6 +6,8 @@ All notable changes to **magma-sidecar** are documented here. This project follo
 
 ## [Unreleased]
 
+## [0.1.04] - 2026-07-03
+
 ### Changed
 
 - `--network` / `MAGMA_NETWORK` now defaults to **`mainnet`** so a standard
@@ -24,6 +26,9 @@ All notable changes to **magma-sidecar** are documented here. This project follo
 - Corrected the `localnet` gateway address in `README.md` to match the value
   baked into `src/policy.rs` (`0xe7f1725e…`), and refreshed
   `docs/LOCAL_DEVELOPMENT.md` to reflect the mainnet-defaulted `.env.example`.
+
+**Compatibility:** built against `monad-bft` IPC rev `cd04c9e` (record the
+validated Monad node release here before tagging).
 
 ## [0.1.03] - 2026-07-02
 
@@ -71,5 +76,6 @@ Monad node release here before tagging).
 placeholders (only `localnet` was runnable; the startup guard enforced this). The real
 addresses were baked in later — see the `Unreleased` section above.
 
+[0.1.04]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.04
 [0.1.03]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.03
 [0.1.0]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.0
