@@ -17,9 +17,10 @@
 # satisfy the ruleset. Uses APT_REPO_TOKEN (Contents:write); the built-in
 # GITHUB_TOKEN can't reach another repo and the org disables SSH deploy keys.
 #
-# Note: createCommitOnBranch inlines file contents (base64) in the request, so
-# very large .deb files could bump GraphQL payload limits. We commit the pool
-# (debs) separately from the small index files to keep each request bounded.
+# Note: createCommitOnBranch inlines file contents (base64) in the request. We
+# send only the files that changed for this release (the new .deb(s) plus the
+# small regenerated index), so the payload stays a few MB regardless of how
+# large the pool grows over time.
 #
 # Used by .github/workflows/build-and-publish.yml on tag pushes and manual
 # dispatch. Safe to run locally: set PUSH=0 to build + sign the tree without
@@ -171,9 +172,8 @@ else
 fi
 
 # ----- Commit changed files via GraphQL (Verified) ------------------------
-# Collect what changed vs the cloned HEAD (added + modified; we never delete),
-# then split pool (debs) from index files so each GraphQL request stays small
-# and the deb is always committed before the index that references it.
+# Collect what changed vs the cloned HEAD (added + modified; we never delete)
+# and commit it all in a single, atomic Verified commit (see below).
 CHANGED=()
 while IFS= read -r line; do
     [ -n "$line" ] && CHANGED+=("$line")
@@ -190,27 +190,16 @@ if [ "${PUSH:-1}" != "1" ]; then
     exit 0
 fi
 
-POOL_FILES=(); META_FILES=()
-for p in "${CHANGED[@]}"; do
-    case "$p" in
-        pool/*) POOL_FILES+=("$p") ;;
-        *)      META_FILES+=("$p") ;;
-    esac
-done
-
 STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 HEAD_OID="$(git rev-parse HEAD)"
 
-if [ "${#POOL_FILES[@]}" -gt 0 ]; then
-    echo "Committing ${#POOL_FILES[@]} pool file(s) via GraphQL (Verified) ..."
-    HEAD_OID="$(gql_commit "${APT_REPO}" "${BRANCH}" "${HEAD_OID}" \
-        "Publish ${PACKAGE} pool ${STAMP}" "${REPO_DIR}" "${POOL_FILES[@]}")"
-fi
-if [ "${#META_FILES[@]}" -gt 0 ]; then
-    echo "Committing ${#META_FILES[@]} index file(s) via GraphQL (Verified) ..."
-    HEAD_OID="$(gql_commit "${APT_REPO}" "${BRANCH}" "${HEAD_OID}" \
-        "Publish ${PACKAGE} index ${STAMP}" "${REPO_DIR}" "${META_FILES[@]}")"
-fi
+# Commit the pool (debs) and index files together in ONE createCommitOnBranch.
+# One commit => one push event => one Pages deploy, so back-to-back publishes
+# can't spawn two racing Pages builds. It's also atomic: a client can never
+# observe an index that references a .deb not yet on the branch.
+echo "Committing ${#CHANGED[@]} file(s) via GraphQL (Verified) ..."
+HEAD_OID="$(gql_commit "${APT_REPO}" "${BRANCH}" "${HEAD_OID}" \
+    "Publish ${PACKAGE} ${STAMP}" "${REPO_DIR}" "${CHANGED[@]}")"
 
 echo ""
 echo "Published. HEAD now ${HEAD_OID}"
