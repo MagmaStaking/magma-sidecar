@@ -27,9 +27,6 @@ All notable changes to **magma-sidecar** are documented here. This project follo
   baked into `src/policy.rs` (`0xe7f1725e…`), and refreshed
   `docs/LOCAL_DEVELOPMENT.md` to reflect the mainnet-defaulted `.env.example`.
 
-**Compatibility:** built against `monad-bft` IPC rev `cd04c9e` (record the
-validated Monad node release here before tagging).
-
 ## [0.1.03] - 2026-07-02
 
 ### Added
