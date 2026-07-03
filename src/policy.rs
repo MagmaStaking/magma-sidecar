@@ -44,10 +44,9 @@
 //! There is exactly one `MagmaSearcherGateway` per network (mainnet, testnet,
 //! localnet). The address is baked into this file rather than loaded from a
 //! config file at runtime, so a gateway redeploy ships as a versioned binary
-//! (and a new `.deb`) rather than an out-of-band ops change. Pick the network
-//! at startup with `--network` (or `MAGMA_NETWORK`); if you don't, the sidecar
-//! falls back to stamping every Insert with the constant `--tx-priority-hex`
-//! and ignores gateway scoring entirely.
+//! (and a new `.deb`) rather than an out-of-band ops change. The network is
+//! selected at startup with `--network` (or `MAGMA_NETWORK`), defaulting to
+//! `mainnet`; use `localnet` for local development.
 
 use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_primitives::{address, Address, B256, U256};
@@ -81,9 +80,9 @@ pub enum Network {
     Mainnet,
     /// Monad testnet (chain id 10143).
     Testnet,
-    /// Local Monad devnet — gateway address comes from
-    /// `mev-entrypoint/test-scripts/script/DeployCounterSearchers.s.sol`,
-    /// deterministic for anvil account #0 at nonce 0.
+    /// Local Monad devnet — gateway address is the deterministic deployment from
+    /// `mev-entrypoint/test-scripts/script/DeployCounterSearchers.s.sol`
+    /// (anvil account #0 / `make deploy`).
     Localnet,
 }
 
@@ -91,9 +90,9 @@ impl Network {
     /// The single allowlisted `MagmaSearcherGateway` for this network.
     pub const fn gateway(self) -> Address {
         match self {
-            // MagmaSearcherGateway proxy on Monad mainnet (mev-entrypoint README).
+            // MagmaSearcherGateway proxy on Monad mainnet
             Self::Mainnet => address!("0xe0232Cf5ee0c6d79118498c29a267D80881011C5"),
-            // MagmaSearcherGateway proxy on Monad testnet (mev-entrypoint README).
+            // MagmaSearcherGateway proxy on Monad testnet
             Self::Testnet => address!("0x21615eDffD849eEd1C08e780032Da3bCd1003CD3"),
             // Deterministic deployment from `make deploy` in mev-entrypoint/test-scripts/.
             Self::Localnet => address!("0xe7f1725e7734ce288f8367e1bb143e90bb3f0512"),

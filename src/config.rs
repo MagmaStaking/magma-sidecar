@@ -35,30 +35,29 @@ pub struct Config {
     /// Optional path to Monad txpool IPC Unix socket (same wire as `monad-eth-txpool-ipc`).
     /// When set, the sidecar subscribes to txpool events and re-injects `EthTxPoolIpcTx`
     /// with a tip-derived priority (see `docs/ARCHITECTURE.md` §"Priority policy").
-    /// Unset = ingress-only (no reprioritization). The `.deb` seeds this to the
-    /// conventional validator path `/home/monad/monad-bft/mempool.sock`.
+    /// Unset = observability-only (`/health`, `/metrics`; no reprioritization). The
+    /// `.deb` seeds this to the conventional validator path `/home/monad/monad-bft/mempool.sock`.
     #[arg(long, env = "MAGMA_TXPOOL_SOCKET")]
     pub txpool_socket: Option<PathBuf>,
 
-    /// Fallback hex priority used when no `--network` is configured, or for txs the
-    /// policy elects not to recompute (matches node `DEFAULT_TX_PRIORITY`).
+    /// Fallback hex priority for gateway txs whose computed score is exactly zero
+    /// (e.g. zero priority fee and zero bid); matches node `DEFAULT_TX_PRIORITY`.
     #[arg(long, env = "MAGMA_TX_PRIORITY", default_value = "0xffff")]
     pub tx_priority_hex: String,
 
-    /// Which network's `MagmaSearcherGateway` to score against. Omitting this
-    /// disables gateway-aware scoring entirely — every Insert is stamped with
-    /// `--tx-priority-hex` (legacy mode, single-tenant local dev only). The
-    /// per-network gateway addresses live in `src/policy.rs`.
-    #[arg(long, env = "MAGMA_NETWORK", value_enum)]
-    pub network: Option<Network>,
+    /// Which network's `MagmaSearcherGateway` to score against. Defaults to
+    /// `mainnet`; use `localnet` for local development. The per-network gateway
+    /// addresses are baked into `src/policy.rs`.
+    #[arg(long, env = "MAGMA_NETWORK", value_enum, default_value = "mainnet")]
+    pub network: Network,
 
     /// How long (milliseconds) the backrun pairing pool holds a cached target tx
-    /// or a parked bid before expiring it. Only used in `--network` (policy) mode.
+    /// or a parked bid before expiring it.
     #[arg(long, env = "MAGMA_BACKRUN_POOL_TTL_MS", default_value_t = 2500)]
     pub backrun_pool_ttl_ms: u64,
 
     /// Upper bound on the number of candidate-target txs the backrun pairing pool
-    /// caches at once (oldest evicted first). Only used in policy mode.
+    /// caches at once (oldest evicted first).
     #[arg(long, env = "MAGMA_BACKRUN_POOL_MAX", default_value_t = 4096)]
     pub backrun_pool_max: usize,
 }

@@ -39,7 +39,7 @@ MemoryHigh=512M
 MemoryMax=768M
 MemorySwapMax=0
 # Generous vs Tokio's worker + blocking-thread pools; too low fails spawns
-# under HTTP-ingress load. Confirm against observed thread count before tightening.
+# under load.
 TasksMax=512
 # CPU pinning: run on the RPC cores (12-15), not the node's consensus cores
 # (8-11). The RPC path is far less latency-critical than consensus, so sharing
@@ -54,7 +54,7 @@ CPUWeight=50
 CPUQuota=100%
 # Deprioritize vs the node under disk contention.
 IOWeight=50
-# FD ceiling: HTTP ingress + txpool IPC + outbound RPC.
+# FD ceiling: observability HTTP + txpool IPC.
 LimitNOFILE=65536
 
 [Install]

@@ -126,11 +126,18 @@ cargo build --release
 
 ### Configure once via `.env.local`
 
-The repo ships a committed `.env.example` template; copy it to a gitignored `.env.local` and edit any values that differ for your machine. Every variable maps 1:1 to a CLI flag in `src/config.rs` (CLI > env > default), so you can override anything ad-hoc on the command line later.
+The repo ships a committed `.env.example` template whose defaults target a **mainnet validator** (network `mainnet`, socket `/home/monad/monad-bft/mempool.sock`). Copy it to a gitignored `.env.local` and override the two values that differ for local dev. Every variable maps 1:1 to a CLI flag in `src/config.rs` (CLI > env > default), so you can also override anything ad-hoc on the command line later.
 
 ```bash
 cp .env.example .env.local   # first time only; the file is gitignored
-# (the defaults already match the docker single-node stack from §1)
+```
+
+Edit `.env.local` for the docker single-node stack from §1:
+
+```bash
+MAGMA_NETWORK=localnet                      # local-devnet gateway baked into src/policy.rs
+MAGMA_TXPOOL_SOCKET=/tmp/monad-mempool.sock # the short symlink from §1a
+MAGMA_SIDECAR_BIND=0.0.0.0:8089             # optional; observability HTTP (/health, /metrics)
 ```
 
 Then load it into your shell and run the sidecar with no flags:
@@ -140,17 +147,9 @@ set -a; source .env.local; set +a
 cargo run --release
 ```
 
-This wires up:
-
-- `MAGMA_SIDECAR_BIND=0.0.0.0:8089` — observability HTTP (`/health`, `/metrics`)
-- `MAGMA_TXPOOL_SOCKET=/tmp/monad-mempool.sock` — the short symlink from §1a
-- `MAGMA_NETWORK=localnet` — selects the local-devnet gateway address baked into `src/policy.rs`
-- `MAGMA_TX_PRIORITY=0xffff` — fallback priority
-- `RUST_LOG=info,magma_sidecar=debug` — surfaces the per-tx "reinjecting" / "skipping" lines
+`MAGMA_NETWORK=localnet` is what activates the local-devnet gateway (the address `make deploy` in `mev-entrypoint/test-scripts/` produces for anvil account #0); leaving it at the `mainnet` default would score against the mainnet gateway, which never appears on your devnet.
 
 A successful attach logs `connected to Monad txpool IPC path=/tmp/monad-mempool.sock`. If you see `txpool IPC connect failed; retrying`, revisit §1a — the socket either isn't writable by your user or the path you passed is over 107 bytes.
-
-To exercise the tip-scoring policy locally, set `MAGMA_NETWORK=localnet`; the gateway address is the one written by `make deploy` in `mev-entrypoint/test-scripts/` (deterministic for anvil account #0 at nonce 0). Without `MAGMA_NETWORK`, every `Insert` is stamped with the constant `MAGMA_TX_PRIORITY` and the gateway-only filter is bypassed — a legacy single-tenant mode, not for scoring.
 
 #### Override on the command line when you want to
 
@@ -237,7 +236,7 @@ Three terminals plus a one-shot fix-up after each fresh `nets/run.sh`:
 
 1. **`monad-bft`**: `cd docker/single-node && nets/run.sh --use-prebuilt`
 2. **Socket fix-up** (per fresh run, see §1a — not a long-running process): `make link-socket` (in `magma-sidecar/`)
-3. **`magma-sidecar`**: `set -a; source .env.local; set +a; cargo run --release` (one-time setup: `cp .env.example .env.local`)
+3. **`magma-sidecar`**: `set -a; source .env.local; set +a; cargo run --release` (one-time setup: `cp .env.example .env.local`, then set `MAGMA_NETWORK=localnet` + the §1a socket path)
 4. **Conflict tests**: `cd mev-entrypoint/test-scripts && make deploy && make test-bundles` (also `test-stress` / `test-ranking` / `test-non-gateway-noop` / `test-backrun` / `test-order`; see §4)
 
 End-to-end data path: **searcher tx → Monad node RPC** → **Monad txpool** → **magma-sidecar reads `EthTxPoolEvent`s, scores by tip, re-injects with priority** → **node honors priority for next block** → **on-chain test contracts**.
