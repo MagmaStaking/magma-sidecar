@@ -6,6 +6,25 @@ All notable changes to **magma-sidecar** are documented here. This project follo
 
 ## [Unreleased]
 
+### Changed
+
+- `--network` / `MAGMA_NETWORK` now defaults to **`mainnet`** so a standard
+  validator install reprioritizes against the mainnet gateway out of the box.
+  Local development must set `--network localnet` explicitly.
+
+### Removed
+
+- Dropped the legacy "no network" mode that stamped every txpool `Insert` with a
+  constant priority. The sidecar now always runs the gateway-allowlist tip policy;
+  `--tx-priority-hex` remains only as the fallback for gateway txs whose computed
+  score is exactly zero.
+
+### Fixed
+
+- Corrected the `localnet` gateway address in `README.md` to match the value
+  baked into `src/policy.rs` (`0xe7f1725e…`), and refreshed
+  `docs/LOCAL_DEVELOPMENT.md` to reflect the mainnet-defaulted `.env.example`.
+
 ## [0.1.03] - 2026-07-02
 
 ### Added

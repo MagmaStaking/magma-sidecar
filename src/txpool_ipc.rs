@@ -2,9 +2,9 @@
 //! by the configured tip policy, and re-inject as RLP `EthTxPoolIpcTx` over the
 //! same socket. Same wire protocol as `monad-eth-txpool-ipc`.
 //!
-//! In `Policy` mode the loop owns a [`PendingPool`] so it can pair backrun bids
-//! with their target tx and emit *multiple* reinjections per Insert (the target,
-//! then the bid). See `crate::backrun` for the pairing logic.
+//! The loop owns a [`PendingPool`] so it can pair backrun bids with their target
+//! tx and emit *multiple* reinjections per Insert (the target, then the bid).
+//! See `crate::backrun` for the pairing logic.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,59 +25,17 @@ use crate::policy::PolicyConfig;
 
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 
-/// How priority is decided for each Insert.
+/// The tip policy applied to each Insert. Only transactions whose `to` is an
+/// allowlisted `MagmaSearcherGateway` (plus the targets they reference) are
+/// reinjected; vanilla traffic is observed (for matching + metrics) but left to
+/// the node's own ordering.
 #[derive(Debug, Clone)]
-pub enum PriorityMode {
-    /// Stamp every tx with the same constant (legacy / fallback when no policy
-    /// file is supplied). This mode does **not** filter on the gateway
-    /// allowlist because it has none — every Insert is reinjected.
-    Constant(U256),
-    /// Score each tx via the tip policy, pairing backrun bids with their target.
-    /// Only transactions whose `to` is an allowlisted `MagmaSearcherGateway`
-    /// (plus the targets they reference) are reinjected; vanilla traffic is
-    /// observed (for matching + metrics) but left to the node's own ordering.
-    Policy {
-        policy: Arc<PolicyConfig>,
-        fallback: U256,
-        ttl: Duration,
-        max_entries: usize,
-    },
-}
-
-impl PriorityMode {
-    fn describe(&self) -> &'static str {
-        match self {
-            PriorityMode::Constant(_) => "constant",
-            PriorityMode::Policy { .. } => "policy",
-        }
-    }
-}
-
-/// Per-mode runtime state, held across reconnects so the backrun pool isn't lost
-/// on a transient socket drop.
-enum ModeState {
-    Constant(U256),
-    // Boxed: `PendingPool` is much larger than the `Constant` variant.
-    Policy(Box<PendingPool>),
-}
-
-impl ModeState {
-    fn from_mode(mode: &PriorityMode) -> Self {
-        match mode {
-            PriorityMode::Constant(p) => ModeState::Constant(*p),
-            PriorityMode::Policy {
-                policy,
-                fallback,
-                ttl,
-                max_entries,
-            } => ModeState::Policy(Box::new(PendingPool::new(
-                policy.clone(),
-                *fallback,
-                *ttl,
-                *max_entries,
-            ))),
-        }
-    }
+pub struct PriorityMode {
+    pub policy: Arc<PolicyConfig>,
+    /// Priority used for a gateway tx whose computed score is exactly zero.
+    pub fallback: U256,
+    pub ttl: Duration,
+    pub max_entries: usize,
 }
 
 pub async fn run_txpool_priority_loop(
@@ -90,12 +48,12 @@ pub async fn run_txpool_priority_loop(
         return;
     }
 
-    info!(mode = mode.describe(), "starting txpool reprioritizer");
+    info!("starting txpool reprioritizer");
     metrics.set_ipc_state(IpcState::Connecting);
 
     // State persists across reconnects: the pool keeps pending bids / cached
     // targets warm, and `sent` dedups echoes of txs we already reinjected.
-    let mut state = ModeState::from_mode(&mode);
+    let mut pool = PendingPool::new(mode.policy, mode.fallback, mode.ttl, mode.max_entries);
     let mut sent: HashMap<TxHash, U256> = HashMap::new();
 
     loop {
@@ -145,29 +103,24 @@ pub async fn run_txpool_priority_loop(
                                 }
                                 metrics.record_insert();
 
-                                let reinjections: Vec<Reinjection> = match &mut state {
-                                    ModeState::Constant(p) => {
-                                        vec![Reinjection { hash, tx, priority: *p }]
+                                let reinjections: Vec<Reinjection> = {
+                                    let expired = pool.prune(Instant::now());
+                                    if expired > 0 {
+                                        metrics.add_backrun_expired(expired);
                                     }
-                                    ModeState::Policy(pool) => {
-                                        let expired = pool.prune(Instant::now());
-                                        if expired > 0 {
-                                            metrics.add_backrun_expired(expired);
-                                        }
-                                        let res = pool.observe(hash, tx);
-                                        if res.skipped_non_gateway {
-                                            debug!(
-                                                ?hash,
-                                                "skipping reinjection: tx not bound for an allowlisted gateway"
-                                            );
-                                            metrics.record_skipped_non_gateway();
-                                        }
-                                        metrics.add_backrun_pairs(res.pairs_matched);
-                                        metrics.add_backrun_pended(res.bids_pended);
-                                        metrics.set_backrun_pending(pool.pending_len() as i64);
-                                        metrics.set_backrun_cache(pool.cache_len() as i64);
-                                        res.reinjections
+                                    let res = pool.observe(hash, tx);
+                                    if res.skipped_non_gateway {
+                                        debug!(
+                                            ?hash,
+                                            "skipping reinjection: tx not bound for an allowlisted gateway"
+                                        );
+                                        metrics.record_skipped_non_gateway();
                                     }
+                                    metrics.add_backrun_pairs(res.pairs_matched);
+                                    metrics.add_backrun_pended(res.bids_pended);
+                                    metrics.set_backrun_pending(pool.pending_len() as i64);
+                                    metrics.set_backrun_cache(pool.cache_len() as i64);
+                                    res.reinjections
                                 };
 
                                 let mut send_failed = false;
@@ -198,9 +151,7 @@ pub async fn run_txpool_priority_loop(
                             | EthTxPoolEventType::Drop { .. }
                             | EthTxPoolEventType::Evict { .. } => {
                                 sent.remove(&ev.tx_hash);
-                                if let ModeState::Policy(pool) = &mut state {
-                                    pool.forget(ev.tx_hash);
-                                }
+                                pool.forget(ev.tx_hash);
                             }
                         }
                     }
@@ -225,39 +176,18 @@ mod tests {
     use alloy_primitives::address;
 
     #[test]
-    fn describe_reports_mode() {
-        assert_eq!(
-            PriorityMode::Constant(U256::from(1u64)).describe(),
-            "constant"
-        );
+    fn builds_empty_backrun_pool() {
         let policy =
             PolicyConfig::for_test(address!("00000000000000000000000000000000000000bb"), 0);
-        let mode = PriorityMode::Policy {
+        let mode = PriorityMode {
             policy: Arc::new(policy),
             fallback: U256::from(0xffffu64),
             ttl: Duration::from_millis(2500),
             max_entries: 16,
         };
-        assert_eq!(mode.describe(), "policy");
-    }
-
-    #[test]
-    fn mode_state_builds_pool_for_policy() {
-        let policy =
-            PolicyConfig::for_test(address!("00000000000000000000000000000000000000bb"), 0);
-        let mode = PriorityMode::Policy {
-            policy: Arc::new(policy),
-            fallback: U256::from(0xffffu64),
-            ttl: Duration::from_millis(2500),
-            max_entries: 16,
-        };
-        match ModeState::from_mode(&mode) {
-            ModeState::Policy(pool) => {
-                assert_eq!(pool.pending_len(), 0);
-                assert_eq!(pool.cache_len(), 0);
-            }
-            ModeState::Constant(_) => panic!("expected policy state"),
-        }
+        let pool = PendingPool::new(mode.policy, mode.fallback, mode.ttl, mode.max_entries);
+        assert_eq!(pool.pending_len(), 0);
+        assert_eq!(pool.cache_len(), 0);
     }
 }
 
@@ -343,7 +273,7 @@ mod ipc_integration_tests {
 
     fn policy_mode() -> (Arc<PolicyConfig>, PriorityMode) {
         let policy = Arc::new(PolicyConfig::for_test(GW, 0));
-        let mode = PriorityMode::Policy {
+        let mode = PriorityMode {
             policy: policy.clone(),
             fallback: U256::from(0xffffu64),
             ttl: Duration::from_millis(2500),

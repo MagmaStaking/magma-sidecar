@@ -12,7 +12,7 @@ The model is **naive, tip-based MEV**: searchers compete for inclusion order thr
 
 ## End-to-end data flow
 
-**Ingress:** Searchers submit transactions **directly to the Monad node's JSON-RPC**, and they land in the node's txpool. 
+**Ingress:** Searchers submit transactions **directly to the Monad node's JSON-RPC**, and they land in the node's txpool.
 
 **Reprioritization:** magma-sidecar is connected to the node's **txpool IPC** and observes `EthTxPoolEvent`s. For each inserted transaction whose `to` is an allowlisted `MagmaSearcherGateway`, it computes a **priority** from the tx's tip (priority fee + bid declared to the gateway, decoded from `magmaSearcherGatewayCall` calldata) and re-injects the tx with that priority over IPC. Vanilla traffic (`to` not on the allowlist, or `CREATE`) is **observed but not reinjected** — the node's default ordering applies, and the sidecar does not contend with other reprioritizers over unrelated traffic. The node uses the supplied priority when constructing the next block.
 
@@ -76,13 +76,13 @@ tip(tx) = effective_priority_fee(tx) * gas_limit(tx)
   - if calldata is a `magmaSearcherGatewayCall(address sender, uint256 bidAmount, uint64 targetBlockNumber, bytes32 targetTxHash, bool requireExclusiveSlot, address searcherContract, bytes searcherCallData)`, the sidecar decodes `bidAmount` from calldata. This is the on-chain enforced minimum net ETH gain on the gateway contract, so it is the right number to rank by. `magmaSearcherGatewayCall` is `payable`, but any `tx.value` is forwarded to the searcher (working capital), not paid to the validator, so we rank purely by the decoded `bidAmount` and do not add `tx.value`.
   - any other call to the gateway (empty calldata, a non-matching selector, a direct `receive()` top-up) gets a bid component of **zero**. We deliberately do not fall back to `tx.value`: a `receive()` deposit is an operational top-up rather than a searcher bid declared as a minimum net gain, and crediting it would let anyone buy priority by sending native value to the gateway.
 
-Each network has exactly one allowlisted `MagmaSearcherGateway`, baked into [`src/policy.rs`](../src/policy.rs) and selected at startup with `--network` (one of `mainnet`, `testnet`, `localnet`). A gateway redeploy ships as a versioned binary rather than an out-of-band config change.
+Each network has exactly one allowlisted `MagmaSearcherGateway`, baked into [`src/policy.rs`](../src/policy.rs) and selected at startup with `--network` (`mainnet` by default; `testnet` or `localnet` otherwise). A gateway redeploy ships as a versioned binary.
 
 The score is mapped into the IPC priority field (a `U256`-shaped slot in `EthTxPoolIpcTx`). Top-of-block bids are ordered by this tip scalar; backrun bids use the structured encoding described in **Backrun pairing** below so they land immediately behind their target rather than being ranked absolutely.
 
 Non-gateway traffic (`to` not the allowlisted gateway, including `CREATE`) is **not reinjected on its own**: the node's default txpool ordering decides where it lands, *unless* a backrun bid references it as a target (see below). This keeps magma-sidecar narrowly scoped to MEV traffic and lets it coexist on the same `mempool.sock` with peer reprioritizers that target different ecosystems.
 
-The `--tx-priority-hex` constant serves as a fallback for gateway-bound txs whose computed score is exactly zero (e.g. zero priority fee, zero bid), and as the legacy "stamp every Insert" priority when the sidecar is run without `--network` at all.
+The `--tx-priority-hex` constant serves as a fallback for gateway-bound txs whose computed score is exactly zero (e.g. zero priority fee, zero bid).
 
 ### Backrun pairing
 
