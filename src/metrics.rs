@@ -52,9 +52,12 @@ pub struct Metrics {
     pub txpool_inserts_total: IntCounter,
     pub txpool_prioritized_total: IntCounter,
     pub txpool_skipped_non_gateway_total: IntCounter,
+    pub txpool_skipped_invalid_gateway_total: IntCounter,
     pub txpool_send_failures_total: IntCounter,
     pub txpool_ipc_reconnects_total: IntCounter,
+    pub txpool_sent_cache_evictions_total: IntCounter,
     pub txpool_ipc_state: IntGauge,
+    pub txpool_sent_cache: IntGauge,
     pub last_event_unix_seconds: IntGauge,
     pub last_send_unix_seconds: IntGauge,
 
@@ -62,6 +65,7 @@ pub struct Metrics {
     pub backrun_pairs_matched_total: IntCounter,
     pub backrun_bids_pended_total: IntCounter,
     pub backrun_bids_expired_total: IntCounter,
+    pub backrun_bids_evicted_total: IntCounter,
     pub backrun_pending: IntGauge,
     pub backrun_cache: IntGauge,
 
@@ -108,6 +112,13 @@ impl Metrics {
         )
         .expect("register txpool_skipped_non_gateway_total");
 
+        let txpool_skipped_invalid_gateway_total = register_int_counter_with_registry!(
+            "txpool_skipped_invalid_gateway_total",
+            "Number of gateway-bound Insert events ignored because calldata was invalid or unsupported.",
+            registry
+        )
+        .expect("register txpool_skipped_invalid_gateway_total");
+
         let txpool_send_failures_total = register_int_counter_with_registry!(
             "txpool_send_failures_total",
             "IPC send failures (each one triggers a reconnect).",
@@ -122,12 +133,26 @@ impl Metrics {
         )
         .expect("register txpool_ipc_reconnects_total");
 
+        let txpool_sent_cache_evictions_total = register_int_counter_with_registry!(
+            "txpool_sent_cache_evictions_total",
+            "Number of oldest reinjection-dedup entries evicted at the configured capacity.",
+            registry
+        )
+        .expect("register txpool_sent_cache_evictions_total");
+
         let txpool_ipc_state = register_int_gauge_with_registry!(
             "txpool_ipc_state",
             "Txpool IPC state: -1=disabled, 0=connecting, 1=connected.",
             registry
         )
         .expect("register txpool_ipc_state");
+
+        let txpool_sent_cache = register_int_gauge_with_registry!(
+            "txpool_sent_cache",
+            "Transaction hashes currently retained to suppress reinjection echoes.",
+            registry
+        )
+        .expect("register txpool_sent_cache");
 
         let last_event_unix_seconds = register_int_gauge_with_registry!(
             "last_event_unix_seconds",
@@ -172,6 +197,13 @@ impl Metrics {
         )
         .expect("register backrun_bids_expired_total");
 
+        let backrun_bids_evicted_total = register_int_counter_with_registry!(
+            "backrun_bids_evicted_total",
+            "Number of oldest parked backrun bids evicted at the configured capacity.",
+            registry
+        )
+        .expect("register backrun_bids_evicted_total");
+
         let backrun_pending = register_int_gauge_with_registry!(
             "backrun_pending",
             "Backrun bids currently parked waiting for their target.",
@@ -192,14 +224,18 @@ impl Metrics {
             txpool_inserts_total,
             txpool_prioritized_total,
             txpool_skipped_non_gateway_total,
+            txpool_skipped_invalid_gateway_total,
             txpool_send_failures_total,
             txpool_ipc_reconnects_total,
+            txpool_sent_cache_evictions_total,
             txpool_ipc_state,
+            txpool_sent_cache,
             last_event_unix_seconds,
             last_send_unix_seconds,
             backrun_pairs_matched_total,
             backrun_bids_pended_total,
             backrun_bids_expired_total,
+            backrun_bids_evicted_total,
             backrun_pending,
             backrun_cache,
             http_requests_total,
@@ -238,6 +274,10 @@ impl Metrics {
         self.txpool_skipped_non_gateway_total.inc();
     }
 
+    pub fn record_skipped_invalid_gateway(&self) {
+        self.txpool_skipped_invalid_gateway_total.inc();
+    }
+
     pub fn add_backrun_pairs(&self, n: u64) {
         if n > 0 {
             self.backrun_pairs_matched_total.inc_by(n);
@@ -256,12 +296,28 @@ impl Metrics {
         }
     }
 
+    pub fn add_backrun_evicted(&self, n: u64) {
+        if n > 0 {
+            self.backrun_bids_evicted_total.inc_by(n);
+        }
+    }
+
     pub fn set_backrun_pending(&self, n: i64) {
         self.backrun_pending.set(n);
     }
 
     pub fn set_backrun_cache(&self, n: i64) {
         self.backrun_cache.set(n);
+    }
+
+    pub fn add_sent_cache_evictions(&self, n: u64) {
+        if n > 0 {
+            self.txpool_sent_cache_evictions_total.inc_by(n);
+        }
+    }
+
+    pub fn set_sent_cache(&self, n: i64) {
+        self.txpool_sent_cache.set(n);
     }
 
     pub fn record_send_failure(&self) {
@@ -300,11 +356,15 @@ impl Metrics {
             tx_inserts_observed: self.txpool_inserts_total.get(),
             tx_prioritized: self.txpool_prioritized_total.get(),
             tx_skipped_non_gateway: self.txpool_skipped_non_gateway_total.get(),
+            tx_skipped_invalid_gateway: self.txpool_skipped_invalid_gateway_total.get(),
             ipc_send_failures: self.txpool_send_failures_total.get(),
             ipc_reconnects: self.txpool_ipc_reconnects_total.get(),
+            sent_cache_entries: self.txpool_sent_cache.get(),
+            sent_cache_evictions: self.txpool_sent_cache_evictions_total.get(),
             backrun_pairs_matched: self.backrun_pairs_matched_total.get(),
             backrun_bids_pending: self.backrun_pending.get(),
             backrun_bids_expired: self.backrun_bids_expired_total.get(),
+            backrun_bids_evicted: self.backrun_bids_evicted_total.get(),
             last_event_unix_seconds: nonzero(self.last_event_ts.load(Ordering::Relaxed)),
             last_send_unix_seconds: nonzero(self.last_send_ts.load(Ordering::Relaxed)),
         }
@@ -342,11 +402,15 @@ pub struct HealthSnapshot {
     pub tx_inserts_observed: u64,
     pub tx_prioritized: u64,
     pub tx_skipped_non_gateway: u64,
+    pub tx_skipped_invalid_gateway: u64,
     pub ipc_send_failures: u64,
     pub ipc_reconnects: u64,
+    pub sent_cache_entries: i64,
+    pub sent_cache_evictions: u64,
     pub backrun_pairs_matched: u64,
     pub backrun_bids_pending: i64,
     pub backrun_bids_expired: u64,
+    pub backrun_bids_evicted: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_event_unix_seconds: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

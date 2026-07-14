@@ -3,7 +3,7 @@ Version: 0.0.0
 Section: utils
 Priority: optional
 Architecture: amd64
-Depends: systemd, libc6
+Depends: systemd, acl, libc6
 Maintainer: Hydrogen Labs <ops@hydrogenlabs.xyz>
 Homepage: https://github.com/MagmaStaking/magma-sidecar
 Vcs-Git: https://github.com/MagmaStaking/magma-sidecar.git

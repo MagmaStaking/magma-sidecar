@@ -49,7 +49,9 @@ Pushing the tag triggers the pipeline, which:
 
 1. Derives the version from the tag.
 2. Builds and pushes the multi-arch Docker image to
-   `ghcr.io/magmastaking/magma-sidecar` (`:X.Y.Z`, `:X.Y`, `:X`, `:latest`).
+   `ghcr.io/magmastaking/magma-sidecar` (`:X.Y.Z`, `:X.Y`, `:X`, `:latest`);
+   this image is a development/test artifact and is not approved for validator
+   hosts.
 3. Builds `amd64` + `arm64` `.deb`s on native runners.
 4. Creates the GitHub Release with both `.deb`s attached.
 5. Regenerates and GPG-signs the APT index and pushes it to the GitHub Pages APT repo.
@@ -75,7 +77,7 @@ curl -fsSL https://magmastaking.github.io/magma-sidecar-apt-repo/dists/stable/In
 curl -fsSL https://magmastaking.github.io/magma-sidecar-apt-repo/dists/stable/main/binary-amd64/Packages \
   | grep -A1 '^Package: magma-sidecar'
 
-# Docker image present
+# Development/test Docker image present
 docker manifest inspect ghcr.io/magmastaking/magma-sidecar:X.Y.Z >/dev/null && echo OK
 ```
 
@@ -84,8 +86,10 @@ before tagging a mainnet-targeted release.
 
 ## Install on a validator
 
-The `monad` user already exists (created by the node package); the node's txpool
-socket lives under `/home/monad/...`, which the hardened unit can reach.
+The package creates a dedicated `magma-sidecar` system user. It must not be
+added to the `monad` group. Before enabling the service, follow
+[`VALIDATOR_INSTALL.md`](VALIDATOR_INSTALL.md) to move the mempool socket to
+`/var/run/monad-ipc/mempool.sock` and grant ACL-only access.
 
 ```bash
 sudo apt update
@@ -93,7 +97,7 @@ sudo apt install magma-sidecar=X.Y.Z        # pin the version explicitly
 # or, from the GitHub Release:
 #   sudo dpkg -i magma-sidecar_X.Y.Z_amd64.deb
 
-sudo vim /etc/magma-sidecar/sidecar.env     # MAGMA_TXPOOL_SOCKET, MAGMA_NETWORK
+sudo vim /etc/magma-sidecar/sidecar.env     # confirm socket path and network
 sudo systemctl enable --now magma-sidecar
 sudo systemctl status magma-sidecar
 journalctl -u magma-sidecar -f              # "loaded tip policy network=..." then "connected to Monad txpool IPC"

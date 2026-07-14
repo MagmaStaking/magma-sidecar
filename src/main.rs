@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use alloy_primitives::U256;
 use clap::Parser;
 use config::Config;
 use metrics::Metrics;
@@ -23,6 +24,11 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 use txpool_ipc::PriorityMode;
 
+const FALLBACK_PRIORITY: u64 = 0xffff;
+const BACKRUN_CACHE_MAX: usize = 4096;
+const BACKRUN_PENDING_MAX: usize = 4096;
+const SENT_CACHE_MAX: usize = 16384;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
@@ -32,9 +38,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let config = Config::parse();
-    let fallback_priority = config::parse_u256_hex(&config.tx_priority_hex).map_err(|e| {
-        format!("invalid --tx-priority-hex / MAGMA_TX_PRIORITY ({e}); use hex, e.g. 0xffff or ffff")
-    })?;
 
     let network = config.network;
     let policy = PolicyConfig::for_network(network);
@@ -61,9 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
     let priority_mode = PriorityMode {
         policy: Arc::new(policy),
-        fallback: fallback_priority,
+        fallback: U256::from(FALLBACK_PRIORITY),
         ttl: Duration::from_millis(config.backrun_pool_ttl_ms),
-        max_entries: config.backrun_pool_max,
+        max_cache_entries: BACKRUN_CACHE_MAX,
+        max_pending_entries: BACKRUN_PENDING_MAX,
+        sent_cache_max: SENT_CACHE_MAX,
     };
 
     let bind: SocketAddr = config.bind;

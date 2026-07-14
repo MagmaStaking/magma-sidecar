@@ -3,8 +3,12 @@
 # magma-sidecar: txpool IPC reprioritizer for Monad (+ /health, /metrics).
 # See README.md and docs/ARCHITECTURE.md.
 #
+# DEVELOPMENT/TEST ONLY. This image is not an approved validator-host
+# distribution. Validator production deployments must use the signed Debian
+# package and its hardened systemd unit.
+#
 # Build:    docker build -t magma-sidecar .
-# Run:      docker run --rm -p 8089:8089 magma-sidecar
+# Run:      docker run --rm -p 127.0.0.1:8089:8089 magma-sidecar
 #           (no txpool socket = observability-only: /health, /metrics)
 #
 # With txpool IPC + network policy (bind-mount the node's socket dir; pick the
@@ -12,7 +16,7 @@
 # short to stay under the AF_UNIX 107-byte limit, see
 # docs/LOCAL_DEVELOPMENT.md §1a):
 #
-#   docker run --rm -p 8089:8089 \
+#   docker run --rm -p 127.0.0.1:8089:8089 \
 #     -v /run/monad:/run/monad:ro \
 #     -e MAGMA_TXPOOL_SOCKET=/run/monad/mempool.sock \
 #     -e MAGMA_NETWORK=localnet \
@@ -67,7 +71,9 @@ COPY --from=builder /usr/local/bin/magma-sidecar /usr/local/bin/magma-sidecar
 USER magma:magma
 
 # Defaults are overridable via -e at `docker run` or a compose env_file.
-# Bind to 0.0.0.0 inside the container so `-p 8089:8089` actually reaches us.
+# Bind on the container interface so Docker can forward the explicitly
+# loopback-only host publication (`-p 127.0.0.1:8089:8089`). Do not publish
+# this unauthenticated observability endpoint on every host interface.
 ENV MAGMA_SIDECAR_BIND=0.0.0.0:8089 \
     RUST_LOG=info,magma_sidecar=info
 

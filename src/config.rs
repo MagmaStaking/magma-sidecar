@@ -6,21 +6,10 @@
 
 use std::path::PathBuf;
 
-use alloy_primitives::U256;
 use clap::Parser;
 use std::net::SocketAddr;
 
 use crate::policy::Network;
-
-/// Parse hex `U256` for `--tx-priority-hex` (with or without `0x`).
-pub fn parse_u256_hex(s: &str) -> Result<U256, String> {
-    let s = s.trim();
-    let hex = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    U256::from_str_radix(hex, 16).map_err(|e| e.to_string())
-}
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "magma-sidecar")]
@@ -36,14 +25,10 @@ pub struct Config {
     /// When set, the sidecar subscribes to txpool events and re-injects `EthTxPoolIpcTx`
     /// with a tip-derived priority (see `docs/ARCHITECTURE.md` §"Priority policy").
     /// Unset = observability-only (`/health`, `/metrics`; no reprioritization). The
-    /// `.deb` seeds this to the conventional validator path `/home/monad/monad-bft/mempool.sock`.
+    /// `.deb` seeds this to the ACL-protected validator path
+    /// `/var/run/monad-ipc/mempool.sock`.
     #[arg(long, env = "MAGMA_TXPOOL_SOCKET")]
     pub txpool_socket: Option<PathBuf>,
-
-    /// Fallback hex priority for gateway txs whose computed score is exactly zero
-    /// (e.g. zero priority fee and zero bid); matches node `DEFAULT_TX_PRIORITY`.
-    #[arg(long, env = "MAGMA_TX_PRIORITY", default_value = "0xffff")]
-    pub tx_priority_hex: String,
 
     /// Which network's `MagmaSearcherGateway` to score against. Defaults to
     /// `mainnet`; use `localnet` for local development. The per-network gateway
@@ -55,9 +40,4 @@ pub struct Config {
     /// or a parked bid before expiring it.
     #[arg(long, env = "MAGMA_BACKRUN_POOL_TTL_MS", default_value_t = 2500)]
     pub backrun_pool_ttl_ms: u64,
-
-    /// Upper bound on the number of candidate-target txs the backrun pairing pool
-    /// caches at once (oldest evicted first).
-    #[arg(long, env = "MAGMA_BACKRUN_POOL_MAX", default_value_t = 4096)]
-    pub backrun_pool_max: usize,
 }
