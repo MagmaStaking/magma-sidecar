@@ -3,6 +3,10 @@
 # magma-sidecar: txpool IPC reprioritizer for Monad (+ /health, /metrics).
 # See README.md and docs/ARCHITECTURE.md.
 #
+# DEVELOPMENT/TEST ONLY. This image is not an approved validator-host
+# distribution. Validator production deployments must use the signed Debian
+# package and its hardened systemd unit.
+#
 # Build:    docker build -t magma-sidecar .
 # Run:      docker run --rm -p 127.0.0.1:8089:8089 magma-sidecar
 #           (no txpool socket = observability-only: /health, /metrics)

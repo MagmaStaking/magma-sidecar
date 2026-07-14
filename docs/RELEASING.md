@@ -49,7 +49,9 @@ Pushing the tag triggers the pipeline, which:
 
 1. Derives the version from the tag.
 2. Builds and pushes the multi-arch Docker image to
-   `ghcr.io/magmastaking/magma-sidecar` (`:X.Y.Z`, `:X.Y`, `:X`, `:latest`).
+   `ghcr.io/magmastaking/magma-sidecar` (`:X.Y.Z`, `:X.Y`, `:X`, `:latest`);
+   this image is a development/test artifact and is not approved for validator
+   hosts.
 3. Builds `amd64` + `arm64` `.deb`s on native runners.
 4. Creates the GitHub Release with both `.deb`s attached.
 5. Regenerates and GPG-signs the APT index and pushes it to the GitHub Pages APT repo.
@@ -75,7 +77,7 @@ curl -fsSL https://magmastaking.github.io/magma-sidecar-apt-repo/dists/stable/In
 curl -fsSL https://magmastaking.github.io/magma-sidecar-apt-repo/dists/stable/main/binary-amd64/Packages \
   | grep -A1 '^Package: magma-sidecar'
 
-# Docker image present
+# Development/test Docker image present
 docker manifest inspect ghcr.io/magmastaking/magma-sidecar:X.Y.Z >/dev/null && echo OK
 ```
 

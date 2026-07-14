@@ -10,7 +10,11 @@ This repo is **separate** from `monad-bft` (its own Cargo project, not a workspa
 
 ## Installation
 
-Three supported install paths, in roughly recommended order for production use. For local development against a Monad devnet, jump to [Run from source](#run-from-source) and [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md).
+The signed Debian package is the only supported deployment path for validator
+hosts. Docker images and source builds are development conveniences, not
+validator production distributions. For local development against a Monad
+devnet, jump to [Run from source](#run-from-source) and
+[`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md).
 
 ### Option 1: Debian package via APT (recommended for validator hosts)
 
@@ -51,9 +55,14 @@ The `postinst` script seeds `/etc/magma-sidecar/sidecar.env` from the example **
 
 You can also grab a release `.deb` directly from [GitHub Releases](https://github.com/MagmaStaking/magma-sidecar/releases) (`amd64` + `arm64` are both published) and `sudo dpkg -i magma-sidecar_<version>_<arch>.deb` if you don't want the APT repo.
 
-### Option 2: Docker (dev, k8s)
+### Option 2: Docker (development only)
 
 Multi-arch images at `ghcr.io/magmastaking/magma-sidecar` (`linux/amd64` + `linux/arm64`).
+
+> **Do not deploy this image on validator hosts.** It is published only for
+> local development and test environments. It is not part of the validator
+> approval path and does not ship the rootless, read-only,
+> no-new-privileges deployment policy required for that environment.
 
 ```bash
 docker pull ghcr.io/magmastaking/magma-sidecar:latest
