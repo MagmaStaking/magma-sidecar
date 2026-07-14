@@ -9,7 +9,6 @@ ENV_FILE=/etc/magma-sidecar/sidecar.env
 ENV_EXAMPLE=/etc/magma-sidecar/sidecar.env.example
 SERVICE_USER=magma-sidecar
 SYSUSERS_FILE=/usr/lib/sysusers.d/magma-sidecar.conf
-MIGRATION_REQUIRED=false
 
 case "$1" in
     configure)
@@ -26,14 +25,6 @@ case "$1" in
         chown "root:${SERVICE_USER}" "${ENV_FILE}"
         chmod 0640 "${ENV_FILE}"
 
-        # Do not restart an upgraded service against the legacy home-directory
-        # socket: the new dedicated user and ProtectHome=true intentionally
-        # cannot access it. Leave the unit stopped until the operator completes
-        # the documented node/RPC socket migration.
-        if grep -Eq '^MAGMA_TXPOOL_SOCKET=/home/monad/' "${ENV_FILE}"; then
-            MIGRATION_REQUIRED=true
-        fi
-
         # Register/reload the unit with systemd, but *do not* enable it
         # automatically — operators must edit /etc/magma-sidecar/sidecar.env
         # (at minimum MAGMA_TXPOOL_SOCKET, MAGMA_NETWORK)
@@ -42,19 +33,9 @@ case "$1" in
         if [ -d /run/systemd/system ]; then
             systemctl --system daemon-reload >/dev/null || true
             # Honour operator's prior enable/disable state on upgrades.
-            if [ -n "$2" ] && [ "${MIGRATION_REQUIRED}" = false ] \
-                && command -v deb-systemd-invoke >/dev/null 2>&1; then
+            if [ -n "$2" ] && command -v deb-systemd-invoke >/dev/null 2>&1; then
                 deb-systemd-invoke try-restart "${UNIT}" >/dev/null || true
             fi
-        fi
-
-        if [ "${MIGRATION_REQUIRED}" = true ]; then
-            cat >&2 <<EOF
-
-magma-sidecar was not restarted because sidecar.env still points under
-/home/monad. Complete the dedicated-user IPC migration in:
-  /usr/share/doc/magma-sidecar/VALIDATOR_INSTALL.md
-EOF
         fi
 
         # First-install hint (`$2` empty == fresh install per dpkg(1)).

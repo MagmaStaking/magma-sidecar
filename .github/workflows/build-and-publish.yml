@@ -46,6 +46,18 @@ jobs:
           echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "is_tag=${{ github.ref_type == 'tag' }}" >> "$GITHUB_OUTPUT"
 
+      # Git tags aren't tied to a branch, so a `v*` tag on any commit would
+      # otherwise cut a release. Refuse to release unless the tagged commit is
+      # reachable from origin/main. workflow_dispatch dev builds are unaffected.
+      - name: Ensure tag is on main
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "${{ github.sha }}" origin/main; then
+            echo "::error::Tag ${{ github.ref_name }} does not point to a commit on origin/main; refusing to release." >&2
+            exit 1
+          fi
+
   # Build each arch natively on its own runner (no QEMU emulation), push each
   # as a tag-less image by digest, then stitch them into one multi-arch tag in
   # the `merge-docker` job. Emulated arm64 builds took ~70 min; native ~10 min.
@@ -202,6 +214,9 @@ jobs:
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
+      # Required for build provenance attestation of the published .debs.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
 
@@ -218,6 +233,14 @@ jobs:
 
       - name: List downloaded artifacts
         run: ls -la artifacts/
+
+      # Signed, non-falsifiable record that these exact .debs were built by this
+      # workflow from this repo/commit. Verify on a validator with:
+      #   gh attestation verify <pkg>.deb --repo MagmaStaking/magma-sidecar
+      - name: Attest build provenance (.deb)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "artifacts/*.deb"
 
       - name: Create GitHub Release (on tag)
         if: github.ref_type == 'tag'

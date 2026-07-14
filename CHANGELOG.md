@@ -6,7 +6,7 @@ All notable changes to **magma-sidecar** are documented here. This project follo
 
 ## [Unreleased]
 
-## [0.1.05] - 2026-07-14
+## [0.1.07] - 2026-07-14
 
 ### Added
 
@@ -20,6 +20,9 @@ All notable changes to **magma-sidecar** are documented here. This project follo
 - `docs/VALIDATOR_INSTALL.md`: the supported production install path, with a
   step-by-step, copy-safe procedure for relocating the `monad-bft` /
   `monad-rpc` mempool socket to `/var/run/monad-ipc`.
+- Build provenance attestation for the published `.deb` packages
+  (`actions/attest-build-provenance`), verifiable with
+  `gh attestation verify <pkg>.deb --repo MagmaStaking/magma-sidecar`.
 
 ### Changed
 
@@ -46,8 +49,6 @@ All notable changes to **magma-sidecar** are documented here. This project follo
   IPC amplification from a hostile or malformed transaction stream. New metrics:
   `backrun_bids_evicted_total`, `txpool_skipped_invalid_gateway_total`,
   `txpool_sent_cache_evictions_total`, `txpool_sent_cache`.
-- `postinst` blocks an automatic restart when `sidecar.env` still points at the
-  legacy `/home/monad` socket, forcing an explicit migration.
 
 ## [0.1.04] - 2026-07-03
 
@@ -116,7 +117,7 @@ Monad node release here before tagging).
 placeholders (only `localnet` was runnable; the startup guard enforced this). The real
 addresses were baked in later — see the `Unreleased` section above.
 
-[0.1.05]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.05
+[0.1.07]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.07
 [0.1.04]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.04
 [0.1.03]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.03
 [0.1.0]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.0
