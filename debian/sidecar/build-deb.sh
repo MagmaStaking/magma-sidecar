@@ -14,6 +14,7 @@
 # for amd64, ubuntu-24.04-arm for arm64) — see .github/workflows/build-and-publish.yml.
 
 set -euo pipefail
+umask 022
 
 if [ $# -lt 1 ]; then
     echo "Error: VERSION argument is required" >&2
@@ -43,6 +44,9 @@ echo "Building ${PACKAGE_NAME} v${VERSION} for ${ARCH} (rust target ${RUST_TARGE
 rm -rf "${BUILD_DIR}/${ARCH}"
 mkdir -p "${DEB_DIR}/DEBIAN" \
          "${DEB_DIR}/usr/bin" \
+         "${DEB_DIR}/usr/lib/magma-sidecar" \
+         "${DEB_DIR}/usr/lib/sysusers.d" \
+         "${DEB_DIR}/usr/share/doc/magma-sidecar" \
          "${DEB_DIR}/lib/systemd/system" \
          "${DEB_DIR}/etc/magma-sidecar"
 
@@ -77,6 +81,12 @@ strip "${DEB_DIR}/usr/bin/magma-sidecar" 2>/dev/null || \
 
 install -m 0644 debian/sidecar/magma-sidecar.service \
     "${DEB_DIR}/lib/systemd/system/magma-sidecar.service"
+install -m 0644 debian/sidecar/magma-sidecar.sysusers \
+    "${DEB_DIR}/usr/lib/sysusers.d/magma-sidecar.conf"
+install -m 0755 debian/sidecar/monad-ipc-setup \
+    "${DEB_DIR}/usr/lib/magma-sidecar/monad-ipc-setup"
+install -m 0644 README.md docs/VALIDATOR_INSTALL.md \
+    "${DEB_DIR}/usr/share/doc/magma-sidecar/"
 
 # Ship the env template as `.example` so postinst can seed the real
 # /etc/magma-sidecar/sidecar.env on first install without ever clobbering an

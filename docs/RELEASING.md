@@ -86,8 +86,10 @@ before tagging a mainnet-targeted release.
 
 ## Install on a validator
 
-The `monad` user already exists (created by the node package); the node's txpool
-socket lives under `/home/monad/...`, which the hardened unit can reach.
+The package creates a dedicated `magma-sidecar` system user. It must not be
+added to the `monad` group. Before enabling the service, follow
+[`VALIDATOR_INSTALL.md`](VALIDATOR_INSTALL.md) to move the mempool socket to
+`/var/run/monad-ipc/mempool.sock` and grant ACL-only access.
 
 ```bash
 sudo apt update
@@ -95,7 +97,7 @@ sudo apt install magma-sidecar=X.Y.Z        # pin the version explicitly
 # or, from the GitHub Release:
 #   sudo dpkg -i magma-sidecar_X.Y.Z_amd64.deb
 
-sudo vim /etc/magma-sidecar/sidecar.env     # MAGMA_TXPOOL_SOCKET, MAGMA_NETWORK
+sudo vim /etc/magma-sidecar/sidecar.env     # confirm socket path and network
 sudo systemctl enable --now magma-sidecar
 sudo systemctl status magma-sidecar
 journalctl -u magma-sidecar -f              # "loaded tip policy network=..." then "connected to Monad txpool IPC"

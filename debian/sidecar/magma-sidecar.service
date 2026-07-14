@@ -6,8 +6,8 @@ Wants=network.target
 
 [Service]
 Type=simple
-User=monad
-Group=monad
+User=magma-sidecar
+Group=magma-sidecar
 # All knobs live here. Every flag in src/config.rs has a 1:1 MAGMA_* env var,
 # so ExecStart stays argument-less and operators edit only this file.
 EnvironmentFile=/etc/magma-sidecar/sidecar.env
@@ -15,21 +15,33 @@ ExecStart=/usr/bin/magma-sidecar
 Restart=always
 RestartSec=2
 
-# Security hardening. ReadOnlyPaths keeps the service from rewriting its own
-# config; the txpool socket lives under /home/monad/... which `monad` owns,
-# so no extra ReadWritePaths needed (ProtectHome=read-only still lets us
-# connect() to AF_UNIX sockets in the home dir).
+# Security hardening. The process has no writable filesystem paths; it connects
+# to the ACL-protected txpool socket under /run/monad-ipc and serves
+# observability on loopback only.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=read-only
+ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
 RestrictSUIDSGID=true
 RestrictNamespaces=true
 LockPersonality=true
-ReadOnlyPaths=/etc/magma-sidecar
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ReadOnlyPaths=/
+
+# Only local Unix IPC and loopback observability are permitted. IPAddressDeny
+# applies to ingress and egress; explicit loopback allows keep /health and
+# /metrics available to local monitoring without permitting network exfiltration.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+IPAddressAllow=::1/128
 
 # Resource containment (cgroup v2) so a compromised or runaway sidecar can
 # never starve the validator's CPU/memory/IO. Memory/task caps are conservative

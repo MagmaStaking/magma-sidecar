@@ -25,7 +25,8 @@ pub struct Config {
     /// When set, the sidecar subscribes to txpool events and re-injects `EthTxPoolIpcTx`
     /// with a tip-derived priority (see `docs/ARCHITECTURE.md` §"Priority policy").
     /// Unset = observability-only (`/health`, `/metrics`; no reprioritization). The
-    /// `.deb` seeds this to the conventional validator path `/home/monad/monad-bft/mempool.sock`.
+    /// `.deb` seeds this to the ACL-protected validator path
+    /// `/var/run/monad-ipc/mempool.sock`.
     #[arg(long, env = "MAGMA_TXPOOL_SOCKET")]
     pub txpool_socket: Option<PathBuf>,
 

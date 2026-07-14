@@ -7,19 +7,31 @@ set -e
 UNIT=magma-sidecar.service
 ENV_FILE=/etc/magma-sidecar/sidecar.env
 ENV_EXAMPLE=/etc/magma-sidecar/sidecar.env.example
+SERVICE_USER=magma-sidecar
+SYSUSERS_FILE=/usr/lib/sysusers.d/magma-sidecar.conf
+MIGRATION_REQUIRED=false
 
 case "$1" in
     configure)
+        # Create the dedicated, unprivileged service identity declaratively.
+        # systemd-sysusers is idempotent and preserves an existing account.
+        systemd-sysusers "${SYSUSERS_FILE}"
+
         # Seed the operator env file from the example on **first** install only.
         # `conffiles` already protects sidecar.env.example from being clobbered by
         # operator edits to sidecar.env on subsequent upgrades.
         if [ ! -e "${ENV_FILE}" ] && [ -e "${ENV_EXAMPLE}" ]; then
             cp "${ENV_EXAMPLE}" "${ENV_FILE}"
-            chmod 0640 "${ENV_FILE}"
-            # If the validator host already has the `monad` group (the same uid
-            # that owns the txpool socket), grant it read on the env file so the
-            # service can pick up MAGMA_* vars. Silent fallback on dev hosts.
-            chgrp monad "${ENV_FILE}" 2>/dev/null || true
+        fi
+        chown "root:${SERVICE_USER}" "${ENV_FILE}"
+        chmod 0640 "${ENV_FILE}"
+
+        # Do not restart an upgraded service against the legacy home-directory
+        # socket: the new dedicated user and ProtectHome=true intentionally
+        # cannot access it. Leave the unit stopped until the operator completes
+        # the documented node/RPC socket migration.
+        if grep -Eq '^MAGMA_TXPOOL_SOCKET=/home/monad/' "${ENV_FILE}"; then
+            MIGRATION_REQUIRED=true
         fi
 
         # Register/reload the unit with systemd, but *do not* enable it
@@ -30,9 +42,19 @@ case "$1" in
         if [ -d /run/systemd/system ]; then
             systemctl --system daemon-reload >/dev/null || true
             # Honour operator's prior enable/disable state on upgrades.
-            if [ -n "$2" ] && command -v deb-systemd-invoke >/dev/null 2>&1; then
+            if [ -n "$2" ] && [ "${MIGRATION_REQUIRED}" = false ] \
+                && command -v deb-systemd-invoke >/dev/null 2>&1; then
                 deb-systemd-invoke try-restart "${UNIT}" >/dev/null || true
             fi
+        fi
+
+        if [ "${MIGRATION_REQUIRED}" = true ]; then
+            cat >&2 <<EOF
+
+magma-sidecar was not restarted because sidecar.env still points under
+/home/monad. Complete the dedicated-user IPC migration in:
+  /usr/share/doc/magma-sidecar/VALIDATOR_INSTALL.md
+EOF
         fi
 
         # First-install hint (`$2` empty == fresh install per dpkg(1)).
@@ -43,15 +65,16 @@ magma-sidecar installed.
 
 The service is **not** enabled yet. Before starting it:
 
-  1. Edit /etc/magma-sidecar/sidecar.env, at minimum set:
-       - MAGMA_TXPOOL_SOCKET
+  1. Follow /usr/share/doc/magma-sidecar/VALIDATOR_INSTALL.md to configure
+     monad-bft and monad-rpc for /var/run/monad-ipc/mempool.sock with ACLs.
+  2. Edit /etc/magma-sidecar/sidecar.env and set:
        - MAGMA_NETWORK   (mainnet | testnet | localnet)
      The gateway address for each network is baked into the binary; switching
      networks is just changing MAGMA_NETWORK and restarting the service.
-  2. systemctl enable --now magma-sidecar
-  3. journalctl -u magma-sidecar -f
+  3. systemctl enable --now magma-sidecar
+  4. journalctl -u magma-sidecar -f
 
-The service runs as User=monad (matching the validator's IPC socket owner).
+The service runs as the dedicated unprivileged User=magma-sidecar.
 EOF
         fi
         ;;

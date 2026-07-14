@@ -6,6 +6,49 @@ All notable changes to **magma-sidecar** are documented here. This project follo
 
 ## [Unreleased]
 
+## [0.1.05] - 2026-07-14
+
+### Added
+
+- Dedicated, unprivileged `magma-sidecar` system user, provisioned via
+  `systemd-sysusers`. The service no longer shares the node's `monad` identity
+  and is never added to the `monad` group.
+- `debian/sidecar/monad-ipc-setup`, a root `ExecStartPre` helper that creates
+  the `/var/run/monad-ipc` tmpfs directory and default ACLs before the node
+  binds the socket, giving the sidecar ACL-only access (`r-x` on the directory,
+  `rw-` on the socket).
+- `docs/VALIDATOR_INSTALL.md`: the supported production install path, with a
+  step-by-step, copy-safe procedure for relocating the `monad-bft` /
+  `monad-rpc` mempool socket to `/var/run/monad-ipc`.
+
+### Changed
+
+- `MAGMA_TXPOOL_SOCKET` now defaults to `/var/run/monad-ipc/mempool.sock`
+  instead of `/home/monad/monad-bft/mempool.sock`.
+- Docker images are explicitly scoped to development/test use and are not an
+  approved validator-host distribution; the Debian package is the only
+  supported deployment path for validator hosts.
+- Safety-sensitive capacities (backrun pool/pending bounds, reinjection dedup
+  cache) and the fallback priority are compiled in rather than exposed as
+  environment variables, so validator configuration cannot weaken them.
+- Per-transaction reinjection/skip logging moved from `debug` to `trace`, and
+  the default `RUST_LOG` is now `info`.
+
+### Security
+
+- Hardened the native systemd unit: dedicated `User`/`Group`, empty
+  `CapabilityBoundingSet`, `SystemCallFilter=@system-service`,
+  `ProtectHome=true`, `ProtectKernelLogs`, `ProtectClock`, and a loopback-only
+  network policy (`IPAddressDeny=any` + `127.0.0.0/8`/`::1/128` allow,
+  `RestrictAddressFamilies`).
+- Bounded the pending-bid pool and reinjection dedup map, and stopped
+  reinjecting invalid/unsupported gateway calls, to prevent memory growth and
+  IPC amplification from a hostile or malformed transaction stream. New metrics:
+  `backrun_bids_evicted_total`, `txpool_skipped_invalid_gateway_total`,
+  `txpool_sent_cache_evictions_total`, `txpool_sent_cache`.
+- `postinst` blocks an automatic restart when `sidecar.env` still points at the
+  legacy `/home/monad` socket, forcing an explicit migration.
+
 ## [0.1.04] - 2026-07-03
 
 ### Changed
@@ -73,6 +116,7 @@ Monad node release here before tagging).
 placeholders (only `localnet` was runnable; the startup guard enforced this). The real
 addresses were baked in later — see the `Unreleased` section above.
 
+[0.1.05]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.05
 [0.1.04]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.04
 [0.1.03]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.03
 [0.1.0]: https://github.com/MagmaStaking/magma-sidecar/releases/tag/v0.1.0

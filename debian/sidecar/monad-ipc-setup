@@ -1,0 +1,17 @@
+#!/bin/sh
+# Run with systemd's `+` privilege prefix as monad-bft.service ExecStartPre
+# before the node (User=monad) binds mempool.sock.
+
+set -eu
+
+IPC_DIR=/var/run/monad-ipc
+SIDECAR_USER=magma-sidecar
+
+if ! getent passwd "${SIDECAR_USER}" >/dev/null; then
+    echo "error: ${SIDECAR_USER} system user does not exist" >&2
+    exit 1
+fi
+
+install -d -o monad -g monad -m 2750 "${IPC_DIR}"
+setfacl -m "u:${SIDECAR_USER}:rx" "${IPC_DIR}"
+setfacl -d -m "u:${SIDECAR_USER}:rw" "${IPC_DIR}"

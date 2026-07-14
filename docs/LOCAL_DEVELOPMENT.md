@@ -126,7 +126,12 @@ cargo build --release
 
 ### Configure once via `.env.local`
 
-The repo ships a committed `.env.example` template whose defaults target a **mainnet validator** (network `mainnet`, socket `/home/monad/monad-bft/mempool.sock`). Copy it to a gitignored `.env.local` and override the two values that differ for local dev. Every variable maps 1:1 to a CLI flag in `src/config.rs` (CLI > env > default), so you can also override anything ad-hoc on the command line later.
+The repo ships a committed `.env.example` template whose defaults target a
+**mainnet validator** (network `mainnet`, ACL-protected socket
+`/var/run/monad-ipc/mempool.sock`). Copy it to a gitignored `.env.local` and
+override the two values that differ for local dev. Every variable maps 1:1 to a
+CLI flag in `src/config.rs` (CLI > env > default), so you can also override
+anything ad-hoc on the command line later.
 
 ```bash
 cp .env.example .env.local   # first time only; the file is gitignored

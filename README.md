@@ -18,7 +18,10 @@ devnet, jump to [Run from source](#run-from-source) and
 
 ### Option 1: Debian package via APT (recommended for validator hosts)
 
-Hosts a versioned `.deb` with a systemd unit, dropped under `monad:monad` so it has the right uid to read the node's txpool IPC socket.
+Hosts a versioned `.deb` with a hardened systemd unit running as the dedicated
+`magma-sidecar` user. Access to the node's txpool IPC socket is granted only by
+an ACL under `/var/run/monad-ipc`; the sidecar is not a member of the `monad`
+group.
 
 ```bash
 # Add the Magma APT repo and signing key (one-time).
@@ -32,11 +35,9 @@ sudo apt update
 sudo apt install magma-sidecar
 # Or a specific version:  sudo apt install magma-sidecar=1.0.0
 
-# Configure: the shipped defaults target a standard mainnet validator, so a
-# mainnet host works out of the box. Set MAGMA_NETWORK only for testnet/localnet,
-# and MAGMA_TXPOOL_SOCKET only if your node writes the socket somewhere other than
-# the standard monad-bft path (/home/monad/monad-bft/mempool.sock). The gateway
-# address for each network is baked into the binary.
+# Before starting, configure monad-bft and monad-rpc to use the ACL-protected
+# socket path as documented in docs/VALIDATOR_INSTALL.md.
+# Then select the correct network; the gateway address is baked into the binary.
 sudo nano /etc/magma-sidecar/sidecar.env
 
 # Start.
@@ -48,10 +49,16 @@ sudo journalctl -u magma-sidecar -f
 The Debian package ships:
 
 - Binary: `/usr/bin/magma-sidecar`
-- Systemd unit: `/lib/systemd/system/magma-sidecar.service` (runs as `User=monad`, hardened, `Restart=always`)
+- Systemd unit: `/lib/systemd/system/magma-sidecar.service` (runs as `User=magma-sidecar`, hardened, `Restart=always`)
 - Config template: `/etc/magma-sidecar/sidecar.env.example`
+- IPC ACL helper: `/usr/lib/magma-sidecar/monad-ipc-setup`
+- Validator runbook: `/usr/share/doc/magma-sidecar/VALIDATOR_INSTALL.md`
 
 The `postinst` script seeds `/etc/magma-sidecar/sidecar.env` from the example **only on first install** — upgrades never clobber operator-edited config.
+
+Follow [`docs/VALIDATOR_INSTALL.md`](docs/VALIDATOR_INSTALL.md) before enabling
+the service. The stock Monad node and RPC units still need drop-ins pointing to
+`/var/run/monad-ipc/mempool.sock`.
 
 You can also grab a release `.deb` directly from [GitHub Releases](https://github.com/MagmaStaking/magma-sidecar/releases) (`amd64` + `arm64` are both published) and `sudo dpkg -i magma-sidecar_<version>_<arch>.deb` if you don't want the APT repo.
 
@@ -188,7 +195,7 @@ See `docs/ARCHITECTURE.md` §"Priority policy" and `src/policy.rs` for the preci
 Environment (optional, every variable maps 1:1 to a CLI flag — CLI > env > default):
 
 - `MAGMA_SIDECAR_BIND` — default `127.0.0.1:8089` (observability HTTP: `/health`, `/metrics`)
-- `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC (default `/home/monad/monad-bft/mempool.sock`; omit/comment to disable reprioritization)
+- `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC (packaged default `/var/run/monad-ipc/mempool.sock`; omit/comment to disable reprioritization)
 - `MAGMA_NETWORK` — `mainnet` | `testnet` | `localnet` (default `mainnet`; selects the baked-in gateway to score against)
 - `MAGMA_BACKRUN_POOL_TTL_MS` — how long the backrun pairing pool holds a cached target / parked bid (default `2500`, CLI flag `--backrun-pool-ttl-ms`)
 - `RUST_LOG` — production default `info`; use `info,magma_sidecar=trace` temporarily for per-transaction diagnostics
