@@ -55,6 +55,9 @@ Pushing the tag triggers the pipeline, which:
 3. Builds `amd64` + `arm64` `.deb`s on native runners.
 4. Creates the GitHub Release with both `.deb`s attached.
 5. Regenerates and GPG-signs the APT index and pushes it to the GitHub Pages APT repo.
+6. Attests build provenance for both `.deb`s (`actions/attest-build-provenance`),
+   producing a signed, `gh attestation verify`-able record that these exact
+   packages were built by this workflow from this commit.
 
 ### Staging / dry run
 
@@ -79,6 +82,12 @@ curl -fsSL https://magmastaking.github.io/magma-sidecar-apt-repo/dists/stable/ma
 
 # Development/test Docker image present
 docker manifest inspect ghcr.io/magmastaking/magma-sidecar:X.Y.Z >/dev/null && echo OK
+
+# Build provenance verifiable for each published .deb
+gh release download vX.Y.Z --pattern '*.deb' --dir /tmp/verify
+for deb in /tmp/verify/*.deb; do
+  gh attestation verify "$deb" --repo MagmaStaking/magma-sidecar
+done
 ```
 
 Promote progressively: validate on **testnet** (with the testnet gateway baked in)
@@ -90,6 +99,16 @@ The package creates a dedicated `magma-sidecar` system user. It must not be
 added to the `monad` group. Before enabling the service, follow
 [`VALIDATOR_INSTALL.md`](VALIDATOR_INSTALL.md) to move the mempool socket to
 `/var/run/monad-ipc/mempool.sock` and grant ACL-only access.
+
+Optionally verify build provenance before installing (defense-in-depth on top of
+the GPG-signed APT index):
+
+```bash
+ARCH=$(dpkg --print-architecture)
+gh release download vX.Y.Z --repo MagmaStaking/magma-sidecar \
+  --pattern "magma-sidecar_*_${ARCH}.deb" --dir .
+gh attestation verify "magma-sidecar_X.Y.Z_${ARCH}.deb" --repo MagmaStaking/magma-sidecar
+```
 
 ```bash
 sudo apt update

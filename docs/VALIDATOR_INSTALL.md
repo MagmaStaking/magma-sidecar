@@ -6,9 +6,18 @@ ACL-only access to the mempool IPC socket. Do not add it to the `monad` group.
 
 ## 1. Install the package
 
+Add the Magma APT repository and signing key (one-time), then install:
+
 ```bash
+# Add the Magma APT repo and signing key (one-time).
+sudo mkdir -p /etc/apt/keyrings
+sudo wget -qO /etc/apt/keyrings/magma.gpg https://magmastaking.github.io/magma-sidecar-apt-repo/magma-apt-key.gpg.bin
+echo "deb [signed-by=/etc/apt/keyrings/magma.gpg] https://magmastaking.github.io/magma-sidecar-apt-repo stable main" \
+  | sudo tee /etc/apt/sources.list.d/magma.list
 sudo apt update
-sudo apt install magma-sidecar=<version>
+
+# Install
+sudo apt install magma-sidecar
 ```
 
 The package:
@@ -42,6 +51,8 @@ build each drop-in from *your own* installed unit — not from a copied example.
 > keystore, network) and can corrupt or break your validator. Build the drop-in
 > from the output of `systemctl cat` as described in each step.
 
+
+
 ### `monad-bft.service` drop-in
 
 **Step 1 — Read your current command.**
@@ -68,7 +79,7 @@ ExecStartPre=+/usr/lib/magma-sidecar/monad-ipc-setup
 ExecStart=
 ```
 
-**Step 4 — Append your own `ExecStart`, changing exactly one flag.** Paste the
+**Step 4 — Append your own** `ExecStart`**, changing exactly one flag.** Paste the
 `ExecStart` you read in Step 1 immediately below the empty `ExecStart=` line,
 then change only the mempool socket path:
 
@@ -77,8 +88,7 @@ then change only the mempool socket path:
 +    --mempool-ipc-path /var/run/monad-ipc/mempool.sock
 ```
 
-Leave every other argument exactly as your host had it (`--keystore-password
-${KEYSTORE_PASSWORD}`, all paths, `--statesync-sq-thread-cpu`, `--otel-endpoint`,
+Leave every other argument exactly as your host had it (`--keystore-password ${KEYSTORE_PASSWORD}`, all paths, `--statesync-sq-thread-cpu`, `--otel-endpoint`,
 etc.). Do not add or remove flags.
 
 The result should have this shape — the `...` stands for *your* unchanged
@@ -104,6 +114,8 @@ grants:
 
 - `magma-sidecar:r-x` on the directory; and
 - default `magma-sidecar:rw-` ACLs inherited by the new socket.
+
+
 
 ### `monad-rpc.service` drop-in
 
@@ -134,6 +146,8 @@ ExecStart=/usr/local/bin/monad-rpc \
     ...
 ```
 
+
+
 ### Sanity-check before starting
 
 Confirm the merged unit has a single `monad-node` command with only the mempool
@@ -148,8 +162,6 @@ systemd-analyze verify monad-rpc.service
 A doubled `ExecStart` (missing the empty reset line) or a mismatched socket path
 between the two units is the most common mistake — fix it before proceeding.
 
-
-
 ## 3. Configure and start in order
 
 ```bash
@@ -158,7 +170,7 @@ sudo systemctl daemon-reload
 sudo systemctl start monad-bft
 sudo systemctl start monad-rpc
 
-sudo editor /etc/magma-sidecar/sidecar.env
+sudo nano /etc/magma-sidecar/sidecar.env
 # Confirm:
 # MAGMA_TXPOOL_SOCKET=/var/run/monad-ipc/mempool.sock
 # MAGMA_NETWORK=mainnet
@@ -166,33 +178,31 @@ sudo editor /etc/magma-sidecar/sidecar.env
 sudo systemctl enable --now magma-sidecar
 ```
 
-An upgrade from the old `User=monad` package is deliberately not restarted
-when `sidecar.env` still points under `/home/monad`; complete this migration
-and start the service explicitly.
+## 4. Verify the sidecar is connected
 
-## 4. Verify isolation and health
+Follow the service logs and confirm it loads its policy and connects to the
+node's txpool over the ACL-protected socket:
 
 ```bash
-id magma-sidecar
-getfacl /var/run/monad-ipc
-getfacl /var/run/monad-ipc/mempool.sock
-
-systemctl show magma-sidecar \
-  -p User -p Group -p NoNewPrivileges -p ProtectHome \
-  -p CapabilityBoundingSet -p RestrictAddressFamilies \
-  -p IPAddressDeny -p IPAddressAllow
-
-systemctl status monad-bft monad-rpc magma-sidecar
-curl -fsS http://127.0.0.1:8089/health | jq
+journalctl -u magma-sidecar -f
 ```
 
-Expected results:
+A healthy startup shows the tip policy loading, then a successful IPC
+connection — for example:
 
-- `magma-sidecar` is not a member of the `monad` group;
-- the directory ACL contains `user:magma-sidecar:r-x`;
-- the socket ACL contains `user:magma-sidecar:rw-`;
-- `/health` reports `"ipc_state":"connected"`; and
-- the observability endpoint is reachable only over loopback.
+```
+INFO magma_sidecar: loaded tip policy network=mainnet gateway=0x… base_fee_floor_wei=0
+INFO magma_sidecar: connected to Monad txpool IPC path=/var/run/monad-ipc/mempool.sock
+```
+
+If instead you see the connection retrying, e.g.:
+
+```
+ERROR magma_sidecar: txpool IPC connect failed; retrying path=/var/run/monad-ipc/mempool.sock
+```
+
+then the node/RPC drop-ins or the ACL setup from step 2 are not yet in effect —
+recheck those before continuing.
 
 Do not use `chmod 666`, add `magma-sidecar` to the `monad` group, or expose
 port 8089 on a validator network interface.
