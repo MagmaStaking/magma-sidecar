@@ -6,7 +6,7 @@
 //! tx and emit *multiple* reinjections per Insert (the target, then the bid).
 //! See `crate::backrun` for the pairing logic.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ use futures::{SinkExt, StreamExt};
 use monad_eth_txpool_ipc::EthTxPoolIpcClient;
 use monad_eth_txpool_types::{EthTxPoolEventType, EthTxPoolIpcTx};
 use tokio::sync::watch;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::backrun::{PendingPool, Reinjection};
 use crate::metrics::{IpcState, Metrics};
@@ -35,7 +35,64 @@ pub struct PriorityMode {
     /// Priority used for a gateway tx whose computed score is exactly zero.
     pub fallback: U256,
     pub ttl: Duration,
-    pub max_entries: usize,
+    pub max_cache_entries: usize,
+    pub max_pending_entries: usize,
+    pub sent_cache_max: usize,
+}
+
+struct SentCache {
+    priorities: HashMap<TxHash, U256>,
+    order: VecDeque<TxHash>,
+    max_entries: usize,
+}
+
+impl SentCache {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            priorities: HashMap::new(),
+            order: VecDeque::new(),
+            max_entries: max_entries.max(1),
+        }
+    }
+
+    fn contains(&self, hash: &TxHash) -> bool {
+        self.priorities.contains_key(hash)
+    }
+
+    /// Insert a sent hash and return the number of oldest entries evicted.
+    fn insert(&mut self, hash: TxHash, priority: U256) -> u64 {
+        if self.priorities.insert(hash, priority).is_none() {
+            self.order.push_back(hash);
+        }
+
+        // Lifecycle events remove entries from the map without an O(n) queue
+        // scan. Compact stale queue entries before they can become another
+        // unbounded structure.
+        if self.order.len() > self.max_entries.saturating_mul(2) {
+            let priorities = &self.priorities;
+            self.order
+                .retain(|candidate| priorities.contains_key(candidate));
+        }
+
+        let mut evicted = 0;
+        while self.priorities.len() > self.max_entries {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if self.priorities.remove(&oldest).is_some() {
+                evicted += 1;
+            }
+        }
+        evicted
+    }
+
+    fn remove(&mut self, hash: &TxHash) {
+        self.priorities.remove(hash);
+    }
+
+    fn len(&self) -> usize {
+        self.priorities.len()
+    }
 }
 
 pub async fn run_txpool_priority_loop(
@@ -53,8 +110,14 @@ pub async fn run_txpool_priority_loop(
 
     // State persists across reconnects: the pool keeps pending bids / cached
     // targets warm, and `sent` dedups echoes of txs we already reinjected.
-    let mut pool = PendingPool::new(mode.policy, mode.fallback, mode.ttl, mode.max_entries);
-    let mut sent: HashMap<TxHash, U256> = HashMap::new();
+    let mut pool = PendingPool::new(
+        mode.policy,
+        mode.fallback,
+        mode.ttl,
+        mode.max_cache_entries,
+        mode.max_pending_entries,
+    );
+    let mut sent = SentCache::new(mode.sent_cache_max);
 
     loop {
         if *shutdown.borrow() {
@@ -98,7 +161,7 @@ pub async fn run_txpool_priority_loop(
                             EthTxPoolEventType::Insert { tx, .. } => {
                                 let hash = ev.tx_hash;
                                 // Echo of a tx we already reinjected: ignore.
-                                if sent.contains_key(&hash) {
+                                if sent.contains(&hash) {
                                     continue;
                                 }
                                 metrics.record_insert();
@@ -110,14 +173,22 @@ pub async fn run_txpool_priority_loop(
                                     }
                                     let res = pool.observe(hash, tx);
                                     if res.skipped_non_gateway {
-                                        debug!(
+                                        trace!(
                                             ?hash,
                                             "skipping reinjection: tx not bound for an allowlisted gateway"
                                         );
                                         metrics.record_skipped_non_gateway();
                                     }
+                                    if res.skipped_invalid_gateway {
+                                        trace!(
+                                            ?hash,
+                                            "skipping reinjection: invalid or unsupported gateway call"
+                                        );
+                                        metrics.record_skipped_invalid_gateway();
+                                    }
                                     metrics.add_backrun_pairs(res.pairs_matched);
                                     metrics.add_backrun_pended(res.bids_pended);
+                                    metrics.add_backrun_evicted(res.bids_evicted);
                                     metrics.set_backrun_pending(pool.pending_len() as i64);
                                     metrics.set_backrun_cache(pool.cache_len() as i64);
                                     res.reinjections
@@ -125,10 +196,10 @@ pub async fn run_txpool_priority_loop(
 
                                 let mut send_failed = false;
                                 for r in reinjections {
-                                    if sent.contains_key(&r.hash) {
+                                    if sent.contains(&r.hash) {
                                         continue;
                                     }
-                                    debug!(hash = ?r.hash, priority = %r.priority, "reinjecting with computed priority");
+                                    trace!(hash = ?r.hash, priority = %r.priority, "reinjecting with computed priority");
                                     let ipc = EthTxPoolIpcTx {
                                         tx: r.tx,
                                         priority: r.priority,
@@ -141,7 +212,9 @@ pub async fn run_txpool_priority_loop(
                                         break;
                                     }
                                     metrics.record_prioritized();
-                                    sent.insert(r.hash, r.priority);
+                                    let evicted = sent.insert(r.hash, r.priority);
+                                    metrics.add_sent_cache_evictions(evicted);
+                                    metrics.set_sent_cache(sent.len() as i64);
                                 }
                                 if send_failed {
                                     break 'connection;
@@ -151,6 +224,7 @@ pub async fn run_txpool_priority_loop(
                             | EthTxPoolEventType::Drop { .. }
                             | EthTxPoolEventType::Evict { .. } => {
                                 sent.remove(&ev.tx_hash);
+                                metrics.set_sent_cache(sent.len() as i64);
                                 pool.forget(ev.tx_hash);
                             }
                         }
@@ -183,11 +257,47 @@ mod tests {
             policy: Arc::new(policy),
             fallback: U256::from(0xffffu64),
             ttl: Duration::from_millis(2500),
-            max_entries: 16,
+            max_cache_entries: 16,
+            max_pending_entries: 16,
+            sent_cache_max: 16,
         };
-        let pool = PendingPool::new(mode.policy, mode.fallback, mode.ttl, mode.max_entries);
+        let pool = PendingPool::new(
+            mode.policy,
+            mode.fallback,
+            mode.ttl,
+            mode.max_cache_entries,
+            mode.max_pending_entries,
+        );
         assert_eq!(pool.pending_len(), 0);
         assert_eq!(pool.cache_len(), 0);
+    }
+
+    #[test]
+    fn sent_cache_evicts_oldest_hash() {
+        let mut sent = SentCache::new(2);
+        let first = TxHash::repeat_byte(1);
+        let second = TxHash::repeat_byte(2);
+        let third = TxHash::repeat_byte(3);
+
+        assert_eq!(sent.insert(first, U256::from(1)), 0);
+        assert_eq!(sent.insert(second, U256::from(2)), 0);
+        assert_eq!(sent.insert(third, U256::from(3)), 1);
+        assert!(!sent.contains(&first));
+        assert!(sent.contains(&second));
+        assert!(sent.contains(&third));
+        assert_eq!(sent.len(), 2);
+    }
+
+    #[test]
+    fn sent_cache_compacts_stale_order_entries() {
+        let mut sent = SentCache::new(2);
+        for byte in 0..10 {
+            let hash = TxHash::repeat_byte(byte);
+            sent.insert(hash, U256::from(byte));
+            sent.remove(&hash);
+        }
+        assert!(sent.order.len() <= sent.max_entries.saturating_mul(2));
+        assert_eq!(sent.len(), 0);
     }
 }
 
@@ -277,7 +387,9 @@ mod ipc_integration_tests {
             policy: policy.clone(),
             fallback: U256::from(0xffffu64),
             ttl: Duration::from_millis(2500),
-            max_entries: 1024,
+            max_cache_entries: 1024,
+            max_pending_entries: 1024,
+            sent_cache_max: 4096,
         };
         (policy, mode)
     }

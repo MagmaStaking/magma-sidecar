@@ -53,8 +53,12 @@ pub struct ObserveResult {
     pub pairs_matched: u64,
     /// Number of bids newly parked because their target wasn't pooled yet.
     pub bids_pended: u64,
+    /// Number of oldest parked bids evicted to enforce the pending-bid cap.
+    pub bids_evicted: u64,
     /// True when the tx was vanilla traffic left for the node's own ordering.
     pub skipped_non_gateway: bool,
+    /// True when the tx targeted the gateway but did not contain a valid gateway call.
+    pub skipped_invalid_gateway: bool,
 }
 
 struct CachedTx {
@@ -80,7 +84,8 @@ pub struct PendingPool {
     policy: Arc<PolicyConfig>,
     fallback: U256,
     ttl: Duration,
-    max_entries: usize,
+    max_cache_entries: usize,
+    max_pending_entries: usize,
 
     /// Recently-seen txs keyed by hash, any of which a future bid may target.
     cache: HashMap<TxHash, CachedTx>,
@@ -103,13 +108,15 @@ impl PendingPool {
         policy: Arc<PolicyConfig>,
         fallback: U256,
         ttl: Duration,
-        max_entries: usize,
+        max_cache_entries: usize,
+        max_pending_entries: usize,
     ) -> Self {
         Self {
             policy,
             fallback,
             ttl,
-            max_entries: max_entries.max(1),
+            max_cache_entries: max_cache_entries.max(1),
+            max_pending_entries: max_pending_entries.max(1),
             cache: HashMap::new(),
             cache_order: VecDeque::new(),
             pending: HashMap::new(),
@@ -172,7 +179,7 @@ impl PendingPool {
                     });
                     res.pairs_matched += 1;
                 } else {
-                    self.push_pending(PendingBid {
+                    res.bids_evicted += self.push_pending(PendingBid {
                         hash,
                         tx,
                         scalar,
@@ -184,17 +191,10 @@ impl PendingPool {
                 return res;
             }
 
-            // Gateway address but not a `magmaSearcherGatewayCall` (e.g. a
-            // `receive()` top-up). Preserve prior behaviour: re-inject with the
-            // plain fee scalar (or the fallback when it's zero). These small,
-            // unstructured numbers sort below every structured bid.
-            let scalar = compute_priority(&tx, &self.policy);
-            let priority = if scalar.is_zero() {
-                self.fallback
-            } else {
-                scalar
-            };
-            res.reinjections.push(Reinjection { hash, tx, priority });
+            // Gateway address but not a valid `magmaSearcherGatewayCall` (e.g.
+            // a `receive()` top-up or malformed calldata). It carries no
+            // sidecar-recognized bid and must not amplify node work via IPC.
+            res.skipped_invalid_gateway = true;
             return res;
         }
 
@@ -310,7 +310,7 @@ impl PendingPool {
         {
             self.cache_order.push_back(hash);
         }
-        while self.cache.len() > self.max_entries {
+        while self.cache.len() > self.max_cache_entries {
             match self.cache_order.pop_front() {
                 Some(old) => {
                     if self.cache.remove(&old).is_some() {
@@ -322,12 +322,32 @@ impl PendingPool {
         }
     }
 
-    fn push_pending(&mut self, bid: PendingBid) {
+    fn push_pending(&mut self, bid: PendingBid) -> u64 {
         let key = bid.target;
         let bid_hash = bid.hash;
         self.pending.entry(key).or_default().push(bid);
         self.pending_order.push_back((key, bid_hash));
         self.pending_count += 1;
+
+        let mut evicted = 0;
+        while self.pending_count > self.max_pending_entries {
+            let Some((target, hash)) = self.pending_order.pop_front() else {
+                break;
+            };
+            let mut remove_target = false;
+            if let Some(bids) = self.pending.get_mut(&target) {
+                if let Some(pos) = bids.iter().position(|candidate| candidate.hash == hash) {
+                    bids.remove(pos);
+                    self.pending_count -= 1;
+                    evicted += 1;
+                    remove_target = bids.is_empty();
+                }
+            }
+            if remove_target {
+                self.pending.remove(&target);
+            }
+        }
+        evicted
     }
 }
 
@@ -351,6 +371,7 @@ mod tests {
             Arc::new(PolicyConfig::for_test(GW, 0)),
             U256::from(0xffffu64),
             Duration::from_millis(2500),
+            1024,
             1024,
         )
     }
@@ -629,6 +650,7 @@ mod tests {
             U256::from(0xffffu64),
             Duration::from_millis(2500),
             2,
+            2,
         );
         p.observe(tx_hash(20), vanilla(OTHER));
         p.observe(tx_hash(21), vanilla(OTHER));
@@ -657,5 +679,56 @@ mod tests {
         assert_eq!(p.pending_len(), 1);
         p.forget(bid_hash);
         assert_eq!(p.pending_len(), 0);
+    }
+
+    #[test]
+    fn capacity_evicts_oldest_pending_bid() {
+        let mut p = PendingPool::new(
+            Arc::new(PolicyConfig::for_test(GW, 0)),
+            U256::from(0xffffu64),
+            Duration::from_millis(2500),
+            8,
+            2,
+        );
+        let first_target = tx_hash(40);
+        let second_target = tx_hash(41);
+        let third_target = tx_hash(42);
+
+        p.observe(
+            tx_hash(43),
+            gateway_tx(gateway_call_calldata_with_target(
+                U256::from(1u64),
+                first_target,
+            )),
+        );
+        p.observe(
+            tx_hash(44),
+            gateway_tx(gateway_call_calldata_with_target(
+                U256::from(1u64),
+                second_target,
+            )),
+        );
+        let res = p.observe(
+            tx_hash(45),
+            gateway_tx(gateway_call_calldata_with_target(
+                U256::from(1u64),
+                third_target,
+            )),
+        );
+
+        assert_eq!(res.bids_evicted, 1);
+        assert_eq!(p.pending_len(), 2);
+        let res = p.observe(first_target, vanilla(OTHER));
+        assert!(res.reinjections.is_empty());
+        assert!(res.skipped_non_gateway);
+    }
+
+    #[test]
+    fn invalid_gateway_call_is_not_reinjected() {
+        let mut p = pool();
+        let res = p.observe(tx_hash(50), gateway_tx(Bytes::new()));
+        assert!(res.reinjections.is_empty());
+        assert!(res.skipped_invalid_gateway);
+        assert!(!res.skipped_non_gateway);
     }
 }

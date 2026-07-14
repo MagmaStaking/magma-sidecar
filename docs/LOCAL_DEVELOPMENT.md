@@ -220,13 +220,14 @@ make test-ranking RPC_URL=http://127.0.0.1:8080
 
 ### Correlating with sidecar logs
 
-With `RUST_LOG=info,magma_sidecar=debug` (the `.env.local` default from §2), each reprioritized tx logs a line like:
+Temporarily set `RUST_LOG=info,magma_sidecar=trace` when you need to correlate
+individual transactions; the production/default filter is `info`:
 
 ```
-DEBUG magma_sidecar: reinjecting with computed priority hash=0x… priority=160000000000003000000000000000
+TRACE magma_sidecar: reinjecting with computed priority hash=0x… priority=160000000000003000000000000000
 ```
 
-and non-allowlisted traffic logs `skipping reinjection: tx not bound for an allowlisted gateway`. `make test-backrun` prints the exact `prio=` it expects per leg (in wei), so you can match those numbers against the `priority=` values in these debug lines — the target's priority should be the largest, the winning backrun's second. `make test-non-gateway-noop` is the easiest way to see the `skipping reinjection` path (the unlisted-gateway leg). The `/health` and `/metrics` counters (`tx_prioritized`, `tx_skipped_non_gateway`) move accordingly.
+and non-allowlisted traffic logs `skipping reinjection: tx not bound for an allowlisted gateway`. `make test-backrun` prints the exact `prio=` it expects per leg (in wei), so you can match those numbers against the `priority=` values in these trace lines — the target's priority should be the largest, the winning backrun's second. `make test-non-gateway-noop` is the easiest way to see the `skipping reinjection` path (the unlisted-gateway leg). The `/health` and `/metrics` counters (`tx_prioritized`, `tx_skipped_non_gateway`) move accordingly.
 
 ---
 

@@ -14,7 +14,7 @@ The model is **naive, tip-based MEV**: searchers compete for inclusion order thr
 
 **Ingress:** Searchers submit transactions **directly to the Monad node's JSON-RPC**, and they land in the node's txpool.
 
-**Reprioritization:** magma-sidecar is connected to the node's **txpool IPC** and observes `EthTxPoolEvent`s. For each inserted transaction whose `to` is an allowlisted `MagmaSearcherGateway`, it computes a **priority** from the tx's tip (priority fee + bid declared to the gateway, decoded from `magmaSearcherGatewayCall` calldata) and re-injects the tx with that priority over IPC. Vanilla traffic (`to` not on the allowlist, or `CREATE`) is **observed but not reinjected** — the node's default ordering applies, and the sidecar does not contend with other reprioritizers over unrelated traffic. The node uses the supplied priority when constructing the next block.
+**Reprioritization:** magma-sidecar is connected to the node's **txpool IPC** and observes `EthTxPoolEvent`s. For each valid `magmaSearcherGatewayCall` transaction whose `to` is an allowlisted `MagmaSearcherGateway`, it computes a **priority** from the tx's tip (priority fee + bid declared to the gateway) and re-injects the tx with that priority over IPC. Vanilla traffic (`to` not on the allowlist, or `CREATE`) and invalid/unsupported gateway calls are **observed but not reinjected** — the node's default ordering applies, and the sidecar does not amplify unrelated traffic over IPC. The node uses the supplied priority when constructing the next block.
 
 ```mermaid
 flowchart LR
@@ -47,7 +47,7 @@ flowchart LR
 ### Magma sidecar (this repository)
 
 - **Role**: sit beside the Monad node, observe txpool events, and feed back tx priorities so MEV-relevant traffic is ordered ahead of vanilla traffic.
-- **Reprioritization (IPC)**: subscribe to the node's txpool over the Unix socket, classify each `Insert` event, and — only for transactions targeting an allowlisted `MagmaSearcherGateway` — compute a tip-based priority and stream the tx back over IPC with that priority. All other Insert events are observed for state tracking but left alone.
+- **Reprioritization (IPC)**: subscribe to the node's txpool over the Unix socket, classify each `Insert` event, and — only for valid gateway calls targeting an allowlisted `MagmaSearcherGateway` — compute a tip-based priority and stream the tx back over IPC with that priority. All other Insert events are observed for state tracking but left alone.
 - **Observability (HTTP)**: expose `/health` and `/metrics` for liveness and Prometheus scraping.
 
 **Repository boundary:** `magma-sidecar` is a standalone Cargo project. For txpool IPC it depends on `monad-eth-txpool-ipc` / `monad-eth-txpool-types` as **git dependencies pinned by `rev`** to the upstream `category-labs/monad-bft` repo (both crates must come from the same tree to keep the wire format in sync; see [`README.md`](../README.md)). A sibling-checkout `path` override is available for local development. Wire formats and socket paths are defined in `monad-bft` and consumed here.
@@ -59,11 +59,11 @@ The Rust binary **`magma-sidecar`** exposes observability HTTP endpoints documen
 - **Health:** `GET /health` for liveness (IPC state + counters).
 - **Metrics:** `GET /metrics` for Prometheus exposition.
 
-**Txpool IPC:** with `--txpool-socket` / `MAGMA_TXPOOL_SOCKET`, the sidecar connects to the node's txpool Unix socket (length-delimited frames, bincode event batches in, RLP `EthTxPoolIpcTx` out, as implemented in `monad-eth-txpool-ipc`). It subscribes to `EthTxPoolEvent` streams and re-injects **Insert** transactions whose `to` is an allowlisted `MagmaSearcherGateway` with a computed **priority**, deduplicating echoes of its own reinjections. The Monad txpool IPC server accepts multiple concurrent clients, so a validator can also run a peer reprioritizer on the same socket; the gateway-targeted filter ensures the services scope their priority decisions to disjoint traffic.
+**Txpool IPC:** with `--txpool-socket` / `MAGMA_TXPOOL_SOCKET`, the sidecar connects to the node's txpool Unix socket (length-delimited frames, bincode event batches in, RLP `EthTxPoolIpcTx` out, as implemented in `monad-eth-txpool-ipc`). It subscribes to `EthTxPoolEvent` streams and re-injects valid gateway-call **Insert** transactions with a computed **priority**, deduplicating echoes of its own reinjections in a bounded FIFO cache. The Monad txpool IPC server accepts multiple concurrent clients, so a validator can also run a peer reprioritizer on the same socket; the gateway-targeted filter ensures the services scope their priority decisions to disjoint traffic.
 
 ### Priority policy
 
-The sidecar's priority is a **tip-based score**, applied **only to transactions whose `to` is an allowlisted `MagmaSearcherGateway`**:
+The sidecar's priority is a **tip-based score**, applied **only to valid `magmaSearcherGatewayCall` transactions whose `to` is an allowlisted `MagmaSearcherGateway`**:
 
 ```
 tip(tx) = effective_priority_fee(tx) * gas_limit(tx)
@@ -74,7 +74,7 @@ tip(tx) = effective_priority_fee(tx) * gas_limit(tx)
 - `effective_priority_fee` is the EIP-1559 priority fee component the validator would receive.
 - `bid_routed_to_MagmaSearcherGateway` is read statically from the signed tx (already known to satisfy `to == gateway` thanks to the allowlist filter):
   - if calldata is a `magmaSearcherGatewayCall(address sender, uint256 bidAmount, uint64 targetBlockNumber, bytes32 targetTxHash, bool requireExclusiveSlot, address searcherContract, bytes searcherCallData)`, the sidecar decodes `bidAmount` from calldata. This is the on-chain enforced minimum net ETH gain on the gateway contract, so it is the right number to rank by. `magmaSearcherGatewayCall` is `payable`, but any `tx.value` is forwarded to the searcher (working capital), not paid to the validator, so we rank purely by the decoded `bidAmount` and do not add `tx.value`.
-  - any other call to the gateway (empty calldata, a non-matching selector, a direct `receive()` top-up) gets a bid component of **zero**. We deliberately do not fall back to `tx.value`: a `receive()` deposit is an operational top-up rather than a searcher bid declared as a minimum net gain, and crediting it would let anyone buy priority by sending native value to the gateway.
+  - any other call to the gateway (empty calldata, a non-matching selector, a direct `receive()` top-up) is observed but not reinjected. We deliberately do not fall back to `tx.value`: a `receive()` deposit is an operational top-up rather than a searcher bid declared as a minimum net gain, and crediting it would let anyone buy priority by sending native value to the gateway.
 
 Each network has exactly one allowlisted `MagmaSearcherGateway`, baked into [`src/policy.rs`](../src/policy.rs) and selected at startup with `--network` (`mainnet` by default; `testnet` or `localnet` otherwise). A gateway redeploy ships as a versioned binary.
 
@@ -103,9 +103,9 @@ backrun bid      : bit 255 = 0 | backrun_id (bits 254..129) | bit 128 = 0 | low 
 - Competing bids on the same target self-order by the **same `fee + bid` scalar TOB uses** — i.e. by total realized validator value (`priority_fee * gas_limit + bidAmount`) — directly behind the target. The bid seated behind the target is the one that pays the proposer the most, whether that value arrives via the gateway bid or via gas. (This is the validator-revenue-maximizing choice; if the protocol later wanted to force value through the taxed `bidAmount` channel, this is the line to change.)
 - Vanilla node-default priorities are small and sort below everything structured here.
 
-To pair a bid with its target the sidecar keeps a small, TTL-bounded state in [`src/backrun.rs`](../src/backrun.rs): a cache of recently-seen txs (candidate targets) and an index of bids parked awaiting their target. Matching is **arrival-order independent** — if the bid arrives first it is parked and flushed when the target appears; if the target is already cached the pair is streamed immediately. When a backrun is paired, the sidecar reinjects **both** the target (boosted to its opportunity slot) and the bid. The cache TTL and capacity are configurable via `--backrun-pool-ttl-ms` / `MAGMA_BACKRUN_POOL_TTL_MS` and `--backrun-pool-max` / `MAGMA_BACKRUN_POOL_MAX`.
+To pair a bid with its target the sidecar keeps small, TTL- and capacity-bounded state in [`src/backrun.rs`](../src/backrun.rs): a cache of recently-seen txs (candidate targets) and an index of bids parked awaiting their target. Matching is **arrival-order independent** — if the bid arrives first it is parked and flushed when the target appears; if the target is already cached the pair is streamed immediately. When a backrun is paired, the sidecar reinjects **both** the target (boosted to its opportunity slot) and the bid. TTL remains configurable via `--backrun-pool-ttl-ms` / `MAGMA_BACKRUN_POOL_TTL_MS`. Safety-sensitive capacities are compiled into the binary rather than exposed to validator configuration: `4096` cached targets, `4096` parked bids, and `16384` reinjection-dedup hashes.
 
-Pairing activity is surfaced on both `/health` and `/metrics`. The Prometheus metric names are `backrun_pairs_matched_total`, `backrun_bids_pended_total`, `backrun_bids_expired_total`, and the `backrun_pending` / `backrun_cache` gauges; the `/health` JSON uses slightly different keys (`backrun_pairs_matched`, `backrun_bids_pending`, `backrun_bids_expired`).
+Pairing activity is surfaced on both `/health` and `/metrics`. The Prometheus metric names include `backrun_pairs_matched_total`, `backrun_bids_pended_total`, `backrun_bids_expired_total`, `backrun_bids_evicted_total`, and the `backrun_pending` / `backrun_cache` gauges. Reinjection dedup pressure is exposed through `txpool_sent_cache` and `txpool_sent_cache_evictions_total`; `/health` includes the corresponding snapshot fields.
 
 This is deliberately more active than a reprioritizer that only pairs when the target is already pooled at bid time, never re-scans, and does not manage competing bids: magma matches arrival-order-independently and actively ranks competing bids behind their target.
 

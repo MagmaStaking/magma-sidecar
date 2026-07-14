@@ -60,7 +60,7 @@ docker pull ghcr.io/magmastaking/magma-sidecar:latest
 # Or pin: ghcr.io/magmastaking/magma-sidecar:1.0.0
 
 # Reprioritize a node's txpool: bind-mount the node's IPC socket and pick the network.
-docker run --rm -p 8089:8089 \
+docker run --rm -p 127.0.0.1:8089:8089 \
   -v /run/monad:/run/monad:ro \
   -e MAGMA_TXPOOL_SOCKET=/run/monad/mempool.sock \
   -e MAGMA_NETWORK=localnet \
@@ -68,6 +68,10 @@ docker run --rm -p 8089:8089 \
 ```
 
 See the comment block at the top of [`Dockerfile`](Dockerfile) for the full incantation (the AF_UNIX 107-byte path limit comes up here; [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md) §1a has the workaround). Without `MAGMA_TXPOOL_SOCKET` the container just serves `/health` and `/metrics` and does no reprioritization.
+
+The observability endpoints are unauthenticated. Keep the host publication
+loopback-only as shown; use an authenticated reverse proxy or a tightly scoped
+monitoring network if remote scraping is required.
 
 ### Option 3: Build from source
 
@@ -126,7 +130,7 @@ To override systemd-managed bits without editing the shipped unit:
 sudo systemctl edit magma-sidecar
 # In the drop-in editor:
 # [Service]
-# Environment="RUST_LOG=info,magma_sidecar=debug"
+# Environment="RUST_LOG=info,magma_sidecar=trace"
 ```
 
 ## Surfaces
@@ -144,16 +148,16 @@ Reprioritization requires a txpool socket. Run **with txpool IPC + tip policy** 
 ```bash
 cd magma-sidecar
 cargo run --release -- \
-  --bind 0.0.0.0:8089 \
+  --bind 127.0.0.1:8089 \
   --txpool-socket /path/to/mempool.sock \
   --network localnet
 ```
 
 Without `--txpool-socket` the sidecar just serves `/health` and `/metrics` and does no reprioritization.
 
-The sidecar **only reinjects** transactions whose `to` is the network's allowlisted `MagmaSearcherGateway` — vanilla traffic is observed (so `tx_inserts_observed` still climbs) but left alone, so the node's default ordering applies and the sidecar doesn't fight other reprioritizers for unrelated txs. Skipped txs are counted in `txpool_skipped_non_gateway_total`.
+The sidecar **only reinjects valid `magmaSearcherGatewayCall` transactions** whose `to` is the network's allowlisted `MagmaSearcherGateway`, plus referenced backrun targets. Vanilla traffic is observed (so `tx_inserts_observed` still climbs) but left alone, so the node's default ordering applies and the sidecar doesn't fight other reprioritizers for unrelated txs. Invalid/unsupported gateway calls are also left alone to avoid IPC amplification. Skips are counted separately in `txpool_skipped_non_gateway_total` and `txpool_skipped_invalid_gateway_total`.
 
-Bids that carry a non-zero `targetTxHash` are treated as **backruns**: the sidecar pairs them with their target tx and reinjects both so the bid lands immediately behind the target (rather than being ranked absolutely, which a large bid would otherwise win). Pairing works regardless of which tx the node sees first and is bounded by `--backrun-pool-ttl-ms` / `--backrun-pool-max`; see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §"Backrun pairing". Pairing activity is exposed via the `backrun_*` metrics and `/health`.
+Bids that carry a non-zero `targetTxHash` are treated as **backruns**: the sidecar pairs them with their target tx and reinjects both so the bid lands immediately behind the target (rather than being ranked absolutely, which a large bid would otherwise win). Pairing works regardless of which tx the node sees first and is bounded by a configurable TTL plus compiled-in capacity limits; see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §"Backrun pairing". Pairing activity is exposed via the `backrun_*` metrics and `/health`.
 
 ### Networks and the gateway address
 
@@ -168,7 +172,7 @@ There is one `MagmaSearcherGateway` per network. The address is baked into [`src
 The score is `priority_fee × gas_limit + bid`, where the bid is:
 
 - the `bidAmount` argument decoded from `magmaSearcherGatewayCall(address sender, uint256 bidAmount, uint64 targetBlockNumber, bytes32 targetTxHash, bool requireExclusiveSlot, address searcherContract, bytes searcherCallData)` calldata when `to == gateway` and the selector matches (the on-chain enforced minimum net ETH gain on the gateway contract; see `mev-entrypoint`), or
-- **zero** for any other call to the gateway (empty calldata, a non-matching selector, a direct `receive()` top-up). We deliberately do not credit `tx.value`: a `receive()` deposit is an operational top-up, not a searcher bid declared as a minimum net gain, and treating it as one would let anyone buy priority by sending native value to the gateway.
+- no sidecar priority for any other call to the gateway (empty calldata, a non-matching selector, a direct `receive()` top-up). These transactions are observed but not reinjected. We deliberately do not credit `tx.value`: a `receive()` deposit is an operational top-up, not a searcher bid declared as a minimum net gain, and treating it as one would let anyone buy priority by sending native value to the gateway.
 
 See `docs/ARCHITECTURE.md` §"Priority policy" and `src/policy.rs` for the precise definition.
 
@@ -177,10 +181,12 @@ Environment (optional, every variable maps 1:1 to a CLI flag — CLI > env > def
 - `MAGMA_SIDECAR_BIND` — default `127.0.0.1:8089` (observability HTTP: `/health`, `/metrics`)
 - `MAGMA_TXPOOL_SOCKET` — Unix socket path for txpool IPC (default `/home/monad/monad-bft/mempool.sock`; omit/comment to disable reprioritization)
 - `MAGMA_NETWORK` — `mainnet` | `testnet` | `localnet` (default `mainnet`; selects the baked-in gateway to score against)
-- `MAGMA_TX_PRIORITY` — fallback hex priority for gateway txs whose computed score is exactly zero (default `0xffff`, CLI flag `--tx-priority-hex`)
 - `MAGMA_BACKRUN_POOL_TTL_MS` — how long the backrun pairing pool holds a cached target / parked bid (default `2500`, CLI flag `--backrun-pool-ttl-ms`)
-- `MAGMA_BACKRUN_POOL_MAX` — max candidate-target txs cached for backrun pairing (default `4096`, CLI flag `--backrun-pool-max`)
-- `RUST_LOG` — e.g. `info,magma_sidecar=debug`
+- `RUST_LOG` — production default `info`; use `info,magma_sidecar=trace` temporarily for per-transaction diagnostics
+
+Safety-sensitive priority and state-cap values are compiled into the binary:
+fallback priority `0xffff`, target cache `4096`, pending bids `4096`, and
+reinjection dedup hashes `16384`. Validators do not need to tune them.
 
 For local dev, copy `.env.example` to `.env.local` (gitignored), edit anything host-specific, then `set -a; source .env.local; set +a; cargo run --release` — see [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md) §2 for the full flow.
 
