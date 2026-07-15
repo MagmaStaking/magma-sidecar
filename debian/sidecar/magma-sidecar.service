@@ -48,11 +48,11 @@ IPAddressAllow=::1/128
 # starting points — retune against measured peak usage (`systemctl status
 # magma-sidecar` reports memory peak; `systemd-cgtop`).
 MemoryHigh=512M
-MemoryMax=768M
+MemoryMax=512M
 MemorySwapMax=0
-# Generous vs Tokio's worker + blocking-thread pools; too low fails spawns
-# under load.
-TasksMax=512
+# Matches the validator-sidecar security profile. Validate thread pressure on
+# representative validator hardware before lowering further.
+TasksMax=64
 # CPU pinning: run on the RPC cores (12-15), not the node's consensus cores
 # (8-11). The RPC path is far less latency-critical than consensus, so sharing
 # it keeps the reprioritizer off the hot cores at negligible cost. Operators
@@ -67,7 +67,7 @@ CPUQuota=100%
 # Deprioritize vs the node under disk contention.
 IOWeight=50
 # FD ceiling: observability HTTP + txpool IPC.
-LimitNOFILE=65536
+LimitNOFILE=4096
 
 [Install]
 WantedBy=multi-user.target

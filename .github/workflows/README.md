@@ -15,7 +15,7 @@
   - `build-docker` — matrix over `amd64` (ubuntu-24.04) and `arm64` (ubuntu-24.04-arm); native (no QEMU) per-arch development/test images pushed by digest
   - `merge-docker` — stitches the per-arch digests into one multi-arch development/test tag at `ghcr.io/magmastaking/magma-sidecar` (not approved for validator hosts)
   - `build-deb` — matrix over `amd64` (ubuntu-24.04) and `arm64` (ubuntu-24.04-arm); both native builds
-  - `publish-release-and-apt` — only on tag or manual dispatch; attaches `.deb`s to a GitHub Release (tags only) and publishes both arches to the signed GitHub Pages APT repo
+  - `publish-release-and-apt` — only on tag or manual dispatch; signs a release manifest containing the image digest and `.deb` hashes, attaches release artifacts to GitHub Releases (tags only), and publishes both arches plus the manifest to the signed GitHub Pages APT repo
 
 ## Version scheme
 
@@ -58,10 +58,12 @@ Once the APT repo is live (public + Pages enabled), end users install with:
 BASE="https://magmastaking.github.io/magma-sidecar-apt-repo"
 sudo mkdir -p /etc/apt/keyrings
 sudo wget -qO /etc/apt/keyrings/magma.gpg "$BASE/magma-apt-key.gpg.bin"
-
 echo "deb [signed-by=/etc/apt/keyrings/magma.gpg] $BASE stable main" \
   | sudo tee /etc/apt/sources.list.d/magma.list
-
 sudo apt update
 sudo apt install magma-sidecar
 ```
+
+Advanced signing-key, release-manifest, package-hash, and provenance checks are
+documented in
+[`docs/RELEASE_VERIFICATION.md`](../../docs/RELEASE_VERIFICATION.md).

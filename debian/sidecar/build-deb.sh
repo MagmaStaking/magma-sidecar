@@ -85,7 +85,7 @@ install -m 0644 debian/sidecar/magma-sidecar.sysusers \
     "${DEB_DIR}/usr/lib/sysusers.d/magma-sidecar.conf"
 install -m 0755 debian/sidecar/monad-ipc-setup \
     "${DEB_DIR}/usr/lib/magma-sidecar/monad-ipc-setup"
-install -m 0644 README.md docs/VALIDATOR_INSTALL.md \
+install -m 0644 README.md docs/VALIDATOR_INSTALL.md docs/RELEASE_VERIFICATION.md \
     "${DEB_DIR}/usr/share/doc/magma-sidecar/"
 
 # Ship the env template as `.example` so postinst can seed the real

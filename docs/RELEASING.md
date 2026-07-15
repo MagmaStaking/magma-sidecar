@@ -58,6 +58,10 @@ Pushing the tag triggers the pipeline, which:
 6. Attests build provenance for both `.deb`s (`actions/attest-build-provenance`),
    producing a signed, `gh attestation verify`-able record that these exact
    packages were built by this workflow from this commit.
+7. Generates and GPG-signs `release-manifest.txt` with the source commit,
+   multi-arch image digest, and SHA256 hashes of both `.deb`s. Tagged releases
+   attach the manifest and signature to GitHub Releases; every publish also
+   stores them under `releases/<version>/` in the Pages APT repository.
 
 ### Staging / dry run
 
@@ -82,13 +86,11 @@ curl -fsSL https://magmastaking.github.io/magma-sidecar-apt-repo/dists/stable/ma
 
 # Development/test Docker image present
 docker manifest inspect ghcr.io/magmastaking/magma-sidecar:X.Y.Z >/dev/null && echo OK
-
-# Build provenance verifiable for each published .deb
-gh release download vX.Y.Z --pattern '*.deb' --dir /tmp/verify
-for deb in /tmp/verify/*.deb; do
-  gh attestation verify "$deb" --repo MagmaStaking/magma-sidecar
-done
 ```
+
+Complete the independent signing-key, release-manifest, package-hash, and
+provenance checks in
+[`RELEASE_VERIFICATION.md`](RELEASE_VERIFICATION.md).
 
 Promote progressively: validate on **testnet** (with the testnet gateway baked in)
 before tagging a mainnet-targeted release.

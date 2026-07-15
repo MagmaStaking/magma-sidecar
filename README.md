@@ -46,6 +46,12 @@ sudo systemctl status magma-sidecar
 sudo journalctl -u magma-sidecar -f
 ```
 
+Every published version also has a GPG-signed release manifest under
+`https://magmastaking.github.io/magma-sidecar-apt-repo/releases/<version>/`
+containing the source commit, container digest, and `.deb` SHA256 hashes.
+Verification commands are in
+[`docs/RELEASE_VERIFICATION.md`](docs/RELEASE_VERIFICATION.md).
+
 The Debian package ships:
 
 - Binary: `/usr/bin/magma-sidecar`
@@ -53,6 +59,7 @@ The Debian package ships:
 - Config template: `/etc/magma-sidecar/sidecar.env.example`
 - IPC ACL helper: `/usr/lib/magma-sidecar/monad-ipc-setup`
 - Validator runbook: `/usr/share/doc/magma-sidecar/VALIDATOR_INSTALL.md`
+- Release verification guide: `/usr/share/doc/magma-sidecar/RELEASE_VERIFICATION.md`
 
 The `postinst` script seeds `/etc/magma-sidecar/sidecar.env` from the example **only on first install** — upgrades never clobber operator-edited config.
 

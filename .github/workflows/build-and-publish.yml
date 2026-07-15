@@ -121,6 +121,8 @@ jobs:
     name: Merge Docker manifest
     needs: [determine-version, build-docker]
     runs-on: ubuntu-latest
+    outputs:
+      image_digest: ${{ steps.image-digest.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -167,6 +169,13 @@ jobs:
           docker buildx imagetools inspect \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
 
+      - name: Record multi-arch image digest
+        id: image-digest
+        run: |
+          IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+          DIGEST="sha256:$(docker buildx imagetools inspect --raw "${IMAGE_REF}" | sha256sum | cut -d' ' -f1)"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
   build-deb:
     name: Build .deb (${{ matrix.arch }})
     needs: determine-version
@@ -208,7 +217,7 @@ jobs:
 
   publish-release-and-apt:
     name: Publish GitHub Release and APT repo
-    needs: [determine-version, build-deb]
+    needs: [determine-version, merge-docker, build-deb]
     runs-on: ubuntu-24.04
     # Skip for plain branch pushes — only tags and manual dispatch publish.
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
@@ -234,6 +243,38 @@ jobs:
       - name: List downloaded artifacts
         run: ls -la artifacts/
 
+      - name: Require release signing key
+        env:
+          APT_SIGNING_KEY_B64: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          if [[ -z "${APT_SIGNING_KEY_B64}" ]]; then
+            echo "::error::APT_SIGNING_KEY is required for every published build." >&2
+            exit 1
+          fi
+
+      - name: Generate and sign release manifest
+        env:
+          APT_SIGNING_KEY_B64: ${{ secrets.APT_SIGNING_KEY }}
+          VERSION: ${{ needs.determine-version.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.merge-docker.outputs.image_digest }}
+        run: |
+          printf '%s' "${APT_SIGNING_KEY_B64}" | base64 -d | gpg --import --batch --yes
+          (
+            cd artifacts
+            {
+              echo "# Magma Sidecar release manifest"
+              echo "# Version: ${VERSION}"
+              echo "# Source-Repository: https://github.com/${GITHUB_REPOSITORY}"
+              echo "# Source-Commit: ${GITHUB_SHA}"
+              echo "# Container-Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${IMAGE_DIGEST}"
+              sha256sum ./*.deb | sed 's#  \./#  #'
+            } > release-manifest.txt
+            sha256sum --check release-manifest.txt
+            gpg --batch --yes --armor --detach-sign \
+              --output release-manifest.txt.asc release-manifest.txt
+            gpg --batch --verify release-manifest.txt.asc release-manifest.txt
+          )
+
       # Signed, non-falsifiable record that these exact .debs were built by this
       # workflow from this repo/commit. Verify on a validator with:
       #   gh attestation verify <pkg>.deb --repo MagmaStaking/magma-sidecar
@@ -246,7 +287,10 @@ jobs:
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v1
         with:
-          files: artifacts/*.deb
+          files: |
+            artifacts/*.deb
+            artifacts/release-manifest.txt
+            artifacts/release-manifest.txt.asc
           name: "Magma Sidecar ${{ github.ref_name }}"
           body: |
             ## Magma Sidecar ${{ github.ref_name }}
@@ -258,13 +302,10 @@ jobs:
             wget https://github.com/MagmaStaking/magma-sidecar/releases/download/${{ github.ref_name }}/${{ env.PACKAGE_NAME }}_${{ needs.determine-version.outputs.version }}_${ARCH}.deb
             sudo dpkg -i ${{ env.PACKAGE_NAME }}_${{ needs.determine-version.outputs.version }}_${ARCH}.deb
 
-            # At minimum set MAGMA_NETWORK (mainnet | testnet | localnet).
-            # MAGMA_TXPOOL_SOCKET defaults to the standard monad-bft path
-            # (/home/monad/monad-bft/mempool.sock). The gateway address per
-            # network is baked into the binary — no policy file.
-            sudo vim /etc/magma-sidecar/sidecar.env
-            sudo systemctl enable --now magma-sidecar
-            sudo systemctl status magma-sidecar
+            # Before enabling the service, follow the packaged validator guide.
+            # It configures monad-bft and monad-rpc to use the ACL-protected
+            # /var/run/monad-ipc/mempool.sock path.
+            less /usr/share/doc/magma-sidecar/VALIDATOR_INSTALL.md
             ```
 
             ### What's included
@@ -272,6 +313,8 @@ jobs:
             - Binary: `/usr/bin/magma-sidecar`
             - Systemd unit: `magma-sidecar.service`
             - Config: `/etc/magma-sidecar/sidecar.env` (seeded from `sidecar.env.example` on first install)
+            - Validator guide: `/usr/share/doc/magma-sidecar/VALIDATOR_INSTALL.md`
+            - Release verification: `/usr/share/doc/magma-sidecar/RELEASE_VERIFICATION.md`
 
             Docker image: `ghcr.io/magmastaking/magma-sidecar:${{ needs.determine-version.outputs.version }}`
         env:
@@ -286,5 +329,8 @@ jobs:
           # org has SSH deploy keys disabled).
           APT_REPO_TOKEN: ${{ secrets.APT_REPO_TOKEN }}
           APT_SIGNING_KEY_B64: ${{ secrets.APT_SIGNING_KEY }}
+          RELEASE_VERSION: ${{ needs.determine-version.outputs.version }}
+          RELEASE_MANIFEST: artifacts/release-manifest.txt
+          RELEASE_MANIFEST_SIGNATURE: artifacts/release-manifest.txt.asc
           PACKAGE: ${{ env.PACKAGE_NAME }}
         run: ./scripts/publish-apt.sh artifacts/*.deb

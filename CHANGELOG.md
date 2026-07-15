@@ -6,6 +6,24 @@ All notable changes to **magma-sidecar** are documented here. This project follo
 
 ## [Unreleased]
 
+## [0.1.08] - 2026-07-15
+
+### Added
+
+- GPG-signed release manifests containing the exact source commit, multi-arch
+  image digest, and SHA256 hashes for each published `.deb`; manifests are
+  attached to tagged GitHub Releases and published under the versioned APT
+  repository path.
+- `docs/RELEASE_VERIFICATION.md` with signing-key fingerprint,
+  release-manifest, package-hash, and GitHub provenance checks.
+
+### Changed
+
+- APT publication now fails closed if its signing key or signed release
+  manifest is missing.
+- Native service resource limits now match the validator-sidecar security
+  profile (`MemoryMax=512M`, `TasksMax=64`, `LimitNOFILE=4096`).
+
 ## [0.1.07] - 2026-07-14
 
 ### Added
