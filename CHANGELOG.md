@@ -6,6 +6,8 @@ All notable changes to **magma-sidecar** are documented here. This project follo
 
 ## [Unreleased]
 
+## [0.1.08] - 2026-07-15
+
 ### Added
 
 - GPG-signed release manifests containing the exact source commit, multi-arch
