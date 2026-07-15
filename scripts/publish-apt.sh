@@ -30,6 +30,9 @@
 #   APT_REPO=MagmaStaking/magma-sidecar-apt-repo \
 #   APT_REPO_TOKEN="github_pat_..."              \
 #   APT_SIGNING_KEY_B64="$(...)"                 # optional locally, required in CI \
+#   RELEASE_VERSION="1.2.3"                      \
+#   RELEASE_MANIFEST="artifacts/release-manifest.txt" \
+#   RELEASE_MANIFEST_SIGNATURE="artifacts/release-manifest.txt.asc" \
 #   scripts/publish-apt.sh path/to/*.deb
 #
 # Layout in the repo (repo root == Pages site root):
@@ -50,11 +53,19 @@ fi
 
 : "${APT_REPO:?APT_REPO is required (e.g. MagmaStaking/magma-sidecar-apt-repo)}"
 : "${APT_REPO_TOKEN:?APT_REPO_TOKEN is required (fine-grained PAT, Contents:write)}"
+PUSH="${PUSH:-1}"
 SUITE="${SUITE:-stable}"
 COMPONENT="${COMPONENT:-main}"
 ARCHES="${ARCHES:-amd64 arm64}"
 PACKAGE="${PACKAGE:-magma-sidecar}"
 BRANCH="${APT_REPO_BRANCH:-main}"
+
+if [ "${PUSH}" = "1" ]; then
+    : "${APT_SIGNING_KEY_B64:?APT_SIGNING_KEY_B64 is required when PUSH=1}"
+    : "${RELEASE_VERSION:?RELEASE_VERSION is required when PUSH=1}"
+    : "${RELEASE_MANIFEST:?RELEASE_MANIFEST is required when PUSH=1}"
+    : "${RELEASE_MANIFEST_SIGNATURE:?RELEASE_MANIFEST_SIGNATURE is required when PUSH=1}"
+fi
 
 # gh reads GH_TOKEN for API/GraphQL calls; the PAT is what signs (via the
 # createCommitOnBranch mutation) and what the clone below authenticates with.
@@ -105,6 +116,25 @@ for f in "$@"; do
 done
 [ "${#DEBS[@]}" -gt 0 ] || { echo "error: no .deb files found among args" >&2; exit 1; }
 
+MANIFEST_SRC=""
+MANIFEST_SIG_SRC=""
+if [ -n "${RELEASE_MANIFEST:-}" ] || [ -n "${RELEASE_MANIFEST_SIGNATURE:-}" ]; then
+    [ -n "${RELEASE_VERSION:-}" ] || {
+        echo "error: RELEASE_VERSION is required with a release manifest" >&2
+        exit 1
+    }
+    [ -n "${RELEASE_MANIFEST:-}" ] && [ -f "${RELEASE_MANIFEST}" ] || {
+        echo "error: RELEASE_MANIFEST is missing or does not exist" >&2
+        exit 1
+    }
+    [ -n "${RELEASE_MANIFEST_SIGNATURE:-}" ] && [ -f "${RELEASE_MANIFEST_SIGNATURE}" ] || {
+        echo "error: RELEASE_MANIFEST_SIGNATURE is missing or does not exist" >&2
+        exit 1
+    }
+    MANIFEST_SRC="$(readlink -f "${RELEASE_MANIFEST}")"
+    MANIFEST_SIG_SRC="$(readlink -f "${RELEASE_MANIFEST_SIGNATURE}")"
+fi
+
 WORKDIR="$(mktemp -d -t magma-apt-XXXXXX)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 
@@ -129,6 +159,19 @@ mkdir -p "${POOL_REL}"
 for f in "${DEBS[@]}"; do
     install -m 0644 "$f" "${POOL_REL}/"
 done
+
+if [ -n "${MANIFEST_SRC}" ]; then
+    case "${RELEASE_VERSION}" in
+        *[!0-9A-Za-z.~+-]*|"")
+            echo "error: invalid RELEASE_VERSION '${RELEASE_VERSION}'" >&2
+            exit 1
+            ;;
+    esac
+    RELEASE_REL="releases/${RELEASE_VERSION}"
+    mkdir -p "${RELEASE_REL}"
+    install -m 0644 "${MANIFEST_SRC}" "${RELEASE_REL}/release-manifest.txt"
+    install -m 0644 "${MANIFEST_SIG_SRC}" "${RELEASE_REL}/release-manifest.txt.asc"
+fi
 
 # apt-ftparchive does the heavy lifting (Packages with size+hashes per entry)
 # instead of hand-rolling md5/sha1/sha256 loops.
@@ -158,11 +201,14 @@ apt-ftparchive -c "${WORKDIR}/aptftp.conf" release "dists/${SUITE}" \
     > "dists/${SUITE}/Release.tmp" \
     && mv "dists/${SUITE}/Release.tmp" "dists/${SUITE}/Release"
 
-# GPG signing is optional locally (lets you smoke-test the layout offline),
-# mandatory in CI — fail loudly if the key var was provided but is malformed.
+# GPG signing is optional only for PUSH=0 local layout smoke tests. Every
+# publishing run fails closed above unless the signing key is present.
 if [ -n "${APT_SIGNING_KEY_B64:-}" ]; then
     echo "Importing signing key..."
     printf '%s' "${APT_SIGNING_KEY_B64}" | base64 -d | gpg --import --batch --yes
+    if [ -n "${MANIFEST_SRC}" ]; then
+        gpg --batch --verify "${MANIFEST_SIG_SRC}" "${MANIFEST_SRC}"
+    fi
     gpg --batch --yes --digest-algo SHA256 \
         --clearsign -o "dists/${SUITE}/InRelease" "dists/${SUITE}/Release"
     gpg --batch --yes --digest-algo SHA256 \
@@ -184,7 +230,7 @@ if [ "${#CHANGED[@]}" -eq 0 ]; then
     exit 0
 fi
 
-if [ "${PUSH:-1}" != "1" ]; then
+if [ "${PUSH}" != "1" ]; then
     echo "PUSH=0 set; skipping commit. ${#CHANGED[@]} file(s) staged in ${REPO_DIR}"
     printf '  %s\n' "${CHANGED[@]}"
     exit 0

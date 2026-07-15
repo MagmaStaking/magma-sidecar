@@ -6,19 +6,23 @@ ACL-only access to the mempool IPC socket. Do not add it to the `monad` group.
 
 ## 1. Install the package
 
-Add the Magma APT repository and signing key (one-time), then install:
+Add the Magma APT repository (one-time), then install:
 
 ```bash
-# Add the Magma APT repo and signing key (one-time).
+BASE="https://magmastaking.github.io/magma-sidecar-apt-repo"
 sudo mkdir -p /etc/apt/keyrings
-sudo wget -qO /etc/apt/keyrings/magma.gpg https://magmastaking.github.io/magma-sidecar-apt-repo/magma-apt-key.gpg.bin
-echo "deb [signed-by=/etc/apt/keyrings/magma.gpg] https://magmastaking.github.io/magma-sidecar-apt-repo stable main" \
+sudo wget -qO /etc/apt/keyrings/magma.gpg \
+  "${BASE}/magma-apt-key.gpg.bin"
+echo "deb [signed-by=/etc/apt/keyrings/magma.gpg] ${BASE} stable main" \
   | sudo tee /etc/apt/sources.list.d/magma.list
 sudo apt update
-
-# Install
 sudo apt install magma-sidecar
 ```
+
+APT verifies the signed repository metadata and package SHA256 automatically.
+For independent key-fingerprint, signed-manifest, package-hash, and build
+provenance checks, see
+[`RELEASE_VERIFICATION.md`](RELEASE_VERIFICATION.md).
 
 The package:
 
