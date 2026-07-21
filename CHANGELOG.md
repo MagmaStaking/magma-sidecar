@@ -6,6 +6,16 @@ All notable changes to **magma-sidecar** are documented here. This project follo
 
 ## [Unreleased]
 
+### Security
+
+- APT signing key and cross-repo PAT moved to the `apt-publish` GitHub
+  Environment (tag refs only, required reviewers). Repository secrets must not
+  hold these values so branch workflows cannot reach them.
+- `workflow_dispatch` is restricted to `main` and no longer publishes to APT or
+  signs packages; only `v*` tags run `publish-release-and-apt`.
+- Third-party GitHub Actions pinned to full commit SHAs; Dependabot watches
+  `github-actions`.
+
 ## [0.1.08] - 2026-07-15
 
 ### Added
