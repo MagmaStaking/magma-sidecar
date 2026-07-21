@@ -6,14 +6,21 @@ this doc covers the human steps around it.
 
 ## Prerequisites (one-time / org-level)
 
-If the APT repo has never been stood up, do [`APT_REPO_SETUP.md`](APT_REPO_SETUP.md)
-first — it's the unambiguous, step-by-step bootstrap for everything below.
+If the APT repo has never been stood up, bootstrap it from the private
+[`magma-apt`](https://github.com/MagmaStaking/magma-apt) runbook first, then
+finish Environment hardening in
+[`.github/workflows/README.md`](../.github/workflows/README.md).
 
 Assumed already in place:
 
-- GitHub secrets: `APT_SIGNING_KEY` (base64 GPG private key), `APT_REPO_TOKEN`
-  (fine-grained PAT with Contents:write on the APT repo); repo var `APT_REPO`
-  (optional; defaults to `MagmaStaking/magma-sidecar-apt-repo`).
+- GitHub Environment `apt-publish` on this repo with:
+  - deployment branch policy allowing only tags matching `v*`
+  - required reviewers (release admins)
+  - Environment secrets: `APT_SIGNING_KEY` (base64 GPG private key),
+    `APT_REPO_TOKEN` (fine-grained PAT with Contents:write on the APT repo)
+  - **no** repository-level copies of those secrets (branch workflows must not
+    be able to read them — see [`.github/workflows/README.md`](../.github/workflows/README.md))
+- Repo var `APT_REPO` (optional; defaults to `MagmaStaking/magma-sidecar-apt-repo`).
 - The APT repo (`MagmaStaking/magma-sidecar-apt-repo`) seeded with the signing
   **public** key and served by GitHub Pages (once public).
 - `GITHUB_TOKEN` with `packages: write` (provided by Actions) for GHCR.
@@ -65,13 +72,17 @@ Pushing the tag triggers the pipeline, which:
 
 ### Staging / dry run
 
-A manual **workflow_dispatch** run (no tag) publishes a `0~dev.<sha>` package to the
-APT repo **without** cutting a GitHub Release — use it to smoke-test the pipeline
-before committing to a real tag:
+A manual **workflow_dispatch** from **`main`** builds Docker images and `.deb`
+artifacts (and pushes GHCR `:dev` / `sha-*` tags) **without** signing, cutting a
+GitHub Release, or publishing to APT. Production credentials live only on the
+`apt-publish` Environment, which is restricted to `v*` tags.
 
 ```bash
 gh workflow run build-and-publish.yml --ref main
 ```
+
+To exercise the full APT sign/push path, cut a real tag (or a throwaway
+`v0.0.0`-style tag on a main commit you are prepared to publish).
 
 ## Verify
 

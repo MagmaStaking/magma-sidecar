@@ -17,8 +17,8 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt
       - name: cargo fmt --check
@@ -28,15 +28,16 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Pin to the same minor used by upstream monad-bft (rust-toolchain.toml
       # in that repo is 1.91.1). Bump together when upgrading the git rev.
-      - uses: dtolnay/rust-toolchain@1.91
+      # dtolnay/rust-toolchain bakes the toolchain into each branch tip; pin that tip.
+      - uses: dtolnay/rust-toolchain@ab40b01f54fe82bdf65693ea090a1e4942c136e7 # 1.91
 
       # Caches ~/.cargo and ./target keyed off Cargo.lock — without this every
       # CI run cold-builds all the monad-bft deps (~10 min on a free runner).
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
 
       - name: cargo test
         run: cargo test --all-targets --locked

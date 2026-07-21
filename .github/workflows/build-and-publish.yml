@@ -21,9 +21,21 @@ jobs:
       is_tag: ${{ steps.version.outputs.is_tag }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+
+      # Defense in depth: branch workflows must not publish. Secrets for APT
+      # live only in the apt-publish Environment (tag refs only), but keep
+      # dispatch itself on main so GHCR :dev tags are not cut from arbitrary
+      # branches.
+      - name: Restrict workflow_dispatch to main
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [[ "${{ github.ref }}" != "refs/heads/main" ]]; then
+            echo "::error::workflow_dispatch is only allowed from main (ref=${{ github.ref }})." >&2
+            exit 1
+          fi
 
       - name: Determine version
         id: version
@@ -79,15 +91,15 @@ jobs:
             runner: ubuntu-24.04-arm
             platform: linux/arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -95,7 +107,7 @@ jobs:
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -110,7 +122,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: docker-digest-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -128,17 +140,17 @@ jobs:
       packages: write
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: /tmp/digests
           pattern: docker-digest-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -146,7 +158,7 @@ jobs:
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -191,16 +203,15 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       # Pin matches Cargo.toml's monad-bft rev. Bump together when upgrading.
-      - uses: dtolnay/rust-toolchain@1.91
+      # dtolnay/rust-toolchain bakes the toolchain into each branch tip; pin that tip.
+      - uses: dtolnay/rust-toolchain@ab40b01f54fe82bdf65693ea090a1e4942c136e7 # 1.91
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: deb-${{ matrix.arch }}
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
 
       - name: Install packaging deps
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev
@@ -209,25 +220,29 @@ jobs:
         run: ./debian/sidecar/build-deb.sh "${{ needs.determine-version.outputs.version }}" "${{ matrix.arch }}"
 
       - name: Upload .deb artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ env.PACKAGE_NAME }}-${{ matrix.arch }}-${{ needs.determine-version.outputs.version }}
           path: build/${{ env.PACKAGE_NAME }}_*_${{ matrix.arch }}.deb
           retention-days: 30
 
+  # Production signing key + APT_REPO_TOKEN live ONLY in the apt-publish
+  # Environment (not repository secrets). Configure that Environment to allow
+  # only tag refs matching v*, with required reviewers. See
+  # .github/workflows/README.md.
   publish-release-and-apt:
     name: Publish GitHub Release and APT repo
     needs: [determine-version, merge-docker, build-deb]
     runs-on: ubuntu-24.04
-    # Skip for plain branch pushes — only tags and manual dispatch publish.
-    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    if: github.ref_type == 'tag'
+    environment: apt-publish
     permissions:
       contents: write
       # Required for build provenance attestation of the published .debs.
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install packaging tools
         run: |
@@ -235,7 +250,7 @@ jobs:
           sudo apt-get install -y dpkg-dev apt-utils gzip gpg
 
       - name: Download .deb artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           merge-multiple: true
@@ -248,7 +263,7 @@ jobs:
           APT_SIGNING_KEY_B64: ${{ secrets.APT_SIGNING_KEY }}
         run: |
           if [[ -z "${APT_SIGNING_KEY_B64}" ]]; then
-            echo "::error::APT_SIGNING_KEY is required for every published build." >&2
+            echo "::error::APT_SIGNING_KEY is required for every published build (Environment: apt-publish)." >&2
             exit 1
           fi
 
@@ -279,13 +294,12 @@ jobs:
       # workflow from this repo/commit. Verify on a validator with:
       #   gh attestation verify <pkg>.deb --repo MagmaStaking/magma-sidecar
       - name: Attest build provenance (.deb)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: "artifacts/*.deb"
 
-      - name: Create GitHub Release (on tag)
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v1
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           files: |
             artifacts/*.deb
@@ -326,7 +340,7 @@ jobs:
           APT_REPO: ${{ vars.APT_REPO || 'MagmaStaking/magma-sidecar-apt-repo' }}
           # Fine-grained PAT with Contents:write on that repo (cross-repo push;
           # the built-in GITHUB_TOKEN can't reach another repository, and the
-          # org has SSH deploy keys disabled).
+          # org has SSH deploy keys disabled). Stored on Environment apt-publish.
           APT_REPO_TOKEN: ${{ secrets.APT_REPO_TOKEN }}
           APT_SIGNING_KEY_B64: ${{ secrets.APT_SIGNING_KEY }}
           RELEASE_VERSION: ${{ needs.determine-version.outputs.version }}

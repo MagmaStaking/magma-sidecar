@@ -18,33 +18,14 @@ devnet, jump to [Run from source](#run-from-source) and
 
 ### Option 1: Debian package via APT (recommended for validator hosts)
 
+Follow [`docs/VALIDATOR_INSTALL.md`](docs/VALIDATOR_INSTALL.md) before enabling
+the service. The stock Monad node and RPC units still need drop-ins pointing to
+`/var/run/monad-ipc/mempool.sock`.
+
 Hosts a versioned `.deb` with a hardened systemd unit running as the dedicated
 `magma-sidecar` user. Access to the node's txpool IPC socket is granted only by
 an ACL under `/var/run/monad-ipc`; the sidecar is not a member of the `monad`
 group.
-
-```bash
-# Add the Magma APT repo and signing key (one-time).
-sudo mkdir -p /etc/apt/keyrings
-sudo wget -qO /etc/apt/keyrings/magma.gpg https://magmastaking.github.io/magma-sidecar-apt-repo/magma-apt-key.gpg.bin
-echo "deb [signed-by=/etc/apt/keyrings/magma.gpg] https://magmastaking.github.io/magma-sidecar-apt-repo stable main" \
-  | sudo tee /etc/apt/sources.list.d/magma.list
-sudo apt update
-
-# Install.
-sudo apt install magma-sidecar
-# Or a specific version:  sudo apt install magma-sidecar=1.0.0
-
-# Before starting, configure monad-bft and monad-rpc to use the ACL-protected
-# socket path as documented in docs/VALIDATOR_INSTALL.md.
-# Then select the correct network; the gateway address is baked into the binary.
-sudo nano /etc/magma-sidecar/sidecar.env
-
-# Start.
-sudo systemctl enable --now magma-sidecar
-sudo systemctl status magma-sidecar
-sudo journalctl -u magma-sidecar -f
-```
 
 Every published version also has a GPG-signed release manifest under
 `https://magmastaking.github.io/magma-sidecar-apt-repo/releases/<version>/`
@@ -63,9 +44,7 @@ The Debian package ships:
 
 The `postinst` script seeds `/etc/magma-sidecar/sidecar.env` from the example **only on first install** — upgrades never clobber operator-edited config.
 
-Follow [`docs/VALIDATOR_INSTALL.md`](docs/VALIDATOR_INSTALL.md) before enabling
-the service. The stock Monad node and RPC units still need drop-ins pointing to
-`/var/run/monad-ipc/mempool.sock`.
+
 
 You can also grab a release `.deb` directly from [GitHub Releases](https://github.com/MagmaStaking/magma-sidecar/releases) (`amd64` + `arm64` are both published) and `sudo dpkg -i magma-sidecar_<version>_<arch>.deb` if you don't want the APT repo.
 

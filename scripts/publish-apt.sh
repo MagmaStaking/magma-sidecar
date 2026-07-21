@@ -22,9 +22,10 @@
 # small regenerated index), so the payload stays a few MB regardless of how
 # large the pool grows over time.
 #
-# Used by .github/workflows/build-and-publish.yml on tag pushes and manual
-# dispatch. Safe to run locally: set PUSH=0 to build + sign the tree without
-# committing (still needs APT_REPO_TOKEN for the initial read-only clone).
+# Used by .github/workflows/build-and-publish.yml on tag pushes only (via the
+# apt-publish Environment). Safe to run locally: set PUSH=0 to build + sign the
+# tree without committing (still needs APT_REPO_TOKEN for the initial read-only
+# clone).
 #
 # Usage:
 #   APT_REPO=MagmaStaking/magma-sidecar-apt-repo \
